@@ -1,8 +1,13 @@
-This is my new prototyping template for computer graphics research.  
-It's extremely simple: a basic mesh BREP and a few tools to edit it.
-It uses path.ux for its framework.
+Polynomial clothoid-based spline solver that's
+optmized for brush strokes.
 
-Replaces [my old es5/requirejs template](https://github.com/joeedh/require_skeleton).
+WIP.
+
+General ideas:
+* Try out shortest path decomposition paper?
+ - Would be fairly easy to do with a bspline curvature function
+ - No need to have seperate arc/clothoid/line primitives in that
+   case, you'd just use a degree 1 (linear) bspline.
 
 # Setup
 
