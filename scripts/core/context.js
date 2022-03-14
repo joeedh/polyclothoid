@@ -4,7 +4,8 @@
 
 import {simple, ToolOp} from '../path.ux/scripts/pathux.js';
 import {Workspace} from './editor.js';
-import {MeshTypes} from './mesh.js';
+import {MeshTypes} from '../stroker/mesh.js';
+import {Brush} from './brush.js';
 
 ToolOp.prototype.undoPre = function (ctx) {
   this._undo = ctx.state.saveFileSync({
@@ -26,6 +27,10 @@ export class Context {
     this.state = state;
   }
 
+  get brush() {
+    return this.state.brush;
+  }
+
   get workspace() {
     return simple.Editor.findEditor(Workspace);
   }
@@ -44,5 +49,6 @@ export class Context {
 
   static defineAPI(api, st) {
     st.dynamicStruct("properties", "properties", "Properties");
+    st.struct("brush", "brush", "brush", api.mapStruct(Brush));
   }
 }

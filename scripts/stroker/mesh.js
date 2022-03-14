@@ -1,7 +1,8 @@
 import {
   Vector2, Vector3, Vector4, Matrix4,
   Quat, util, math, nstructjs, BaseVector
-} from '../path.ux/pathux.js';
+} from './pathux.js';
+import {Curve, Solver} from './spline.js';
 
 'use strict';
 
@@ -176,6 +177,9 @@ export class Vertex extends Element {
       return this.edges[1];
     else if (e === this.edges[1])
       return this.edges[0];
+    else {
+      return undefined;
+    }
   }
 
   loadJSON(obj) {
@@ -253,6 +257,17 @@ export class Edge extends Element {
     this.h1 = this.h2 = undefined;
     this.v1 = this.v2 = undefined;
     this.l = undefined;
+
+    this.curve = undefined;
+  }
+
+  update() {
+    this.curve.update();
+    return this;
+  }
+
+  get length() {
+    return this.curve.length;
   }
 
   get loops() {
@@ -279,14 +294,21 @@ export class Edge extends Element {
     })();
   }
 
-  evaluate(t) {
-    return _evaluate_vs.next().load(this.v1).interp(this.v2, t);
+  evaluate(s) {
+    return this.curve.evaluate(s);
+    //return _evaluate_vs.next().load(this.v1).interp(this.v2, t);
   }
 
-  derivative(t) {
-    let df = 0.0001;
-    let a = this.evaluate(t - df);
-    let b = this.evaluate(t + df);
+  derivative(s) {
+    let eps = 0.00005;
+    s = s * (1.0 - eps*2.0) + eps;
+
+    return this.curve.derivative(s);
+
+
+    let df = 0.00001;
+    let a = this.evaluate(s - df);
+    let b = this.evaluate(s + df);
 
     return b.sub(a).mulScalar(0.5/df);
   }
@@ -299,7 +321,22 @@ export class Edge extends Element {
     return b.sub(a).mulScalar(0.5/df);
   }
 
+  normal(s) {
+    let dv1 = this.derivative(s);
+    //dv1.normalize();
+
+    dv1.mulScalar(0.01);
+
+    let tmp = dv1[0];
+    dv1[0] = dv1[1];
+    dv1[1] = -tmp;
+
+    return dv1;
+  }
+
   curvature(t) {
+    return this.curve.curvature(t);
+
     let dv1 = this.derivative(t);
     let dv2 = this.derivative2(t);
 
@@ -354,11 +391,12 @@ export class Edge extends Element {
 }
 
 Edge.STRUCT = nstructjs.inherit(Edge, Element, "mesh.Edge") + `
-  v1   : int | this.v1.eid;
-  v2   : int | this.v2.eid;
-  h1   : int | this.h1.eid;
-  h2   : int | this.h2.eid;
-  l    : int | this.l ? this.l.eid : -1;
+  v1           : int | this.v1.eid;
+  v2           : int | this.v2.eid;
+  h1           : int | this.h1.eid;
+  h2           : int | this.h2.eid;
+  l            : int | this.l ? this.l.eid : -1;
+  curve        : ${Curve.structName};
 }`;
 nstructjs.register(Edge);
 
@@ -905,10 +943,19 @@ mesh.ElementArray {
 `
 nstructjs.register(ElementArray);
 
+export const RecalcFlags = {
+  SOLVE : 1
+};
+
 export class Mesh {
   constructor() {
     this.eidgen = new util.IDGen();
     this.eidMap = new Map();
+
+    this.recalc = RecalcFlags.SOLVE;
+
+    this.CurveCls = Curve;
+    this.SolverCls = Solver;
 
     this.verts = undefined;
     this.lists = undefined;
@@ -920,6 +967,37 @@ export class Mesh {
     this.elists = {};
 
     this.makeElists();
+  }
+
+  ensureSolve() {
+    if (this.recalc & RecalcFlags.SOLVE) {
+      this.solve();
+    }
+  }
+
+  switchSplineType(CurveCls, SolverCls) {
+    this.CurveCls = CurveCls;
+    this.SolverCls = SolverCls;
+
+    for (let e of this.edges) {
+      e.curve = new CurveCls();
+    }
+
+    this.regenSolve();
+  }
+
+  solve() {
+    this.recalc &= ~RecalcFlags.SOLVE;
+
+    let solver = new this.SolverCls(this);
+    solver.solve();
+
+    return this;
+  }
+
+  regenSolve() {
+    this.recalc |= RecalcFlags.SOLVE;
+    return this;
   }
 
   get elements() {
@@ -1014,6 +1092,16 @@ export class Mesh {
     return h;
   }
 
+  reverseEdge(e) {
+    let v = e.v1;
+    e.v1 = e.v2;
+    e.v2 = v;
+
+    let h = e.h1;
+    e.h1 = e.h2;
+    e.h2 = h;
+  }
+
   getEdge(v1, v2) {
     for (let e of v1.edges) {
       if (e.otherVertex(v1) === v2)
@@ -1036,6 +1124,8 @@ export class Mesh {
     e.h2 = this.makeHandle(v1);
     e.h2.interp(v2, 2.0/3.0);
     e.h2.owner = e;
+
+    e.curve = new this.CurveCls(v1, v2);
 
     v1.edges.push(e);
     v2.edges.push(e);
@@ -1526,6 +1616,8 @@ export class Mesh {
   loadSTRUCT(reader) {
     reader(this);
 
+    this.recalc = 0;
+
     let elists = this.elists;
     this.elists = {};
 
@@ -1614,6 +1706,18 @@ export class Mesh {
       elist.active = eidMap.get(elist.active);
       elist.highlight = eidMap.get(elist.highlight);
     }
+
+    for (let e of this.edges) {
+      if (e.curve) {
+        e.curve.afterSTRUCT(e.v1, e.v2);
+      } else {
+        e.curve = new Curve(e.v1, e.v2);
+      }
+
+      e.update();
+    }
+
+    this.switchSplineType(Curve, Solver);
   }
 }
 

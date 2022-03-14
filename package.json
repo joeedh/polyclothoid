@@ -1,6 +1,9 @@
 {
   "type": "module",
-  "scripts" : {
-    "setup" : "git submodule init && git submodule foreach git submodule init && git submodule foreach git submodule update"
+  "scripts": {
+    "setup": "git submodule init && git submodule foreach git submodule init && git submodule foreach git submodule update"
+  },
+  "devDependencies": {
+    "rollup": "^2.70.1"
   }
 }

@@ -1,5 +1,5 @@
 import {BoolProperty, EnumProperty, FlagProperty, IntProperty, ToolOp} from '../path.ux/scripts/pathux.js';
-import {MeshFlags, MeshTypes} from './mesh.js';
+import {MeshFlags, MeshTypes} from '../stroker/mesh.js';
 import {SelToolModes} from './mesh_ops.js';
 
 
@@ -94,7 +94,7 @@ export class SelectOneOp extends SelectOpBase {
     let tool = super.invoke(ctx, args);
 
     if (!("selMask" in args)) {
-      tool.inputs.selMask.setValue(MeshTypes.VERTEX | MeshTypes.HANDLE);
+      tool.inputs.selMask.setValue(MeshTypes.VERTEX);
     }
 
     return tool;

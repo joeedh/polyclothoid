@@ -4,7 +4,7 @@ import {
   FloatProperty, BoolProperty, IntProperty,
   EnumProperty, FlagProperty
 } from '../path.ux/pathux.js';
-import {Mesh, MeshFlags, MeshTypes} from './mesh.js';
+import {Mesh, MeshFlags, MeshTypes} from '../stroker/mesh.js';
 
 export let SelToolModes = {
   ADD : 0,
@@ -39,6 +39,7 @@ export class MeshOp extends ToolOp {
   }
 
   execPost(ctx) {
+    ctx.mesh.regenSolve();
     window.redraw_all();
   }
 }
@@ -89,7 +90,7 @@ export class DeleteOp extends MeshOp {
       uiname : "Delete",
       toolpath : "mesh.delete",
       inputs : ToolOp.inherit({
-        selMask : new FlagProperty(MeshTypes.HANDLE|MeshTypes.VERTEX, MeshTypes)
+        selMask : new FlagProperty(MeshTypes.VERTEX, MeshTypes)
       })
     }
   }
@@ -131,3 +132,27 @@ export class DeleteOp extends MeshOp {
   }
 }
 ToolOp.register(DeleteOp);
+
+
+export class FlipMeshOp extends MeshOp {
+  static tooldef() {
+    return {
+      uiname : "Flip Edges",
+      toolpath : "mesh.flip_edge",
+      inputs : ToolOp.inherit({
+        selMask : new FlagProperty(MeshTypes.VERTEX, MeshTypes)
+      })
+    }
+  }
+
+  exec(ctx) {
+    let mesh = ctx.mesh;
+
+    for (let e of new Set(mesh.edges.selected.editable)) {
+      mesh.reverseEdge(e);
+    }
+
+    mesh.regenSolve();
+  }
+}
+ToolOp.register(FlipMeshOp);

@@ -1,6 +1,6 @@
 import {
   NumberConstraints, nstructjs, PropTypes, util, simple, DataStruct, PropSubTypes, UIBase, Container, saveUIData,
-  loadUIData
+  loadUIData, PropFlags
 } from '../path.ux/scripts/pathux.js';
 
 /* maps both name -> proptype and proptype -> name */
@@ -101,15 +101,15 @@ export class PropertiesBag {
       let def;
 
       if (item.type === "float") {
-        def = st.float(k, k, uiname, descr);
+        def = st.float(k, k, uiname, descr).noUnits();
       } else if (item.type === "int") {
-        def = st.int(k, k, uiname, descr);
+        def = st.int(k, k, uiname, descr).noUnits();
       } else if (item.type === "vec2") {
-        def = st.vec2(k, k, uiname, descr);
+        def = st.vec2(k, k, uiname, descr).noUnits();
       } else if (item.type === "vec3") {
-        def = st.vec3(k, k, uiname, descr);
+        def = st.vec3(k, k, uiname, descr).noUnits();
       } else if (item.type === "vec4") {
-        def = st.vec4(k, k, uiname, descr);
+        def = st.vec4(k, k, uiname, descr).noUnits();
       } else if (item.type === "color3") {
         def = st.color3(k, k, uiname, descr);
       } else if (item.type === "color4") {
@@ -128,6 +128,16 @@ export class PropertiesBag {
         console.error("Unknown property type " + item.type, item);
         continue;
       }
+
+      if (item.useIcons) {
+        def.data.flag |= PropFlags.USE_ICONS;
+      }
+
+      if (item.useCheckBoxes) {
+        def.data.flag |= PropFlags.FORCE_ENUM_CHECKBOXES;
+      }
+
+      def.on('change', window.redraw_all);
 
       if (item.onchange) {
         def.on('change', item.onchange);
@@ -190,7 +200,7 @@ export class PropertiesBag {
 
     for (let prop of props) {
       let item = {};
-      templ[prop.apiname] = {};
+      templ[prop.apiname] = item;
 
       let type = PropTypeMap[prop.type];
 
@@ -200,7 +210,7 @@ export class PropertiesBag {
 
       item.type = type;
       item.uiName = prop.uiname;
-      item.value = prop.value;
+      item.value = prop.getValue();
 
       let pr = PropTypes;
       let numberTypes = pr.FLOAT | pr.INT | pr.VEC2 | pr.VEC3 | pr.VEC4;
@@ -230,12 +240,14 @@ export class PropertiesBag {
       prop.setValue(this[prop.apiname]);
     }
 
+    console.log("SAVE PROPS", util.list(this._props));
     return this._props;
   }
 
   loadSTRUCT(reader) {
+    reader(this);
+
     let templ = this.constructor.templateFromProps(this._props);
-    console.log("Template:", templ);
     this.loadTemplate(templ);
   }
 
@@ -249,10 +261,12 @@ export class PropertiesBag {
     return obj;
   }
 }
-simple.DataModel.register(PropertiesBag);
 PropertiesBag.STRUCT = `
+PropertiesBag {
   _props : array(abstract(ToolProperty)) | this._save();
+}
 `;
+simple.DataModel.register(PropertiesBag);
 
 export class PropsEditor extends Container {
   constructor() {

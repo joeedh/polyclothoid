@@ -3,22 +3,45 @@ import {
 } from '../path.ux/pathux.js';
 
 import './editor.js';
-import {Mesh, MeshTypes} from './mesh.js';
+import {Mesh, MeshTypes} from '../stroker/mesh.js';
 import {Workspace} from './editor.js';
 import {FileArgs} from '../path.ux/scripts/simple/file.js';
 import {PropertiesBag} from './property_templ.js';
 import {Context} from './context.js';
+import {Brush, BrushModes} from './brush.js';
+import {ColorOptions} from './mesh_editor.js';
 
-export const STARTUP_FILE_KEY = "_startup_file_1";
+export const STARTUP_FILE_KEY = "_startup_file_pc";
+
+let ColorOptions2 = Object.assign({}, ColorOptions);
+delete ColorOptions2.CONTROL_POINTS;
 
 export const Properties = {
-  steps  : {type: "int", value: 1, min: 0, max: 10, slideSpeed : 5},
-  boolVal: {type: "bool", value: true},
+  steps            : {type: "int", value: 1, min: 0, max: 10, slideSpeed: 5},
+  boolVal          : {type: "bool", value: true},
+  drawExtra        : {type: "bool", value: true},
+  drawNormals      : {type: "bool", value: false},
+  brushMode        : {type: "enum", value: BrushModes.DEBUG, def : BrushModes},
+  drawMesh         : {type: "bool", value: true},
+  lag              : {type: "float", value: 1.0, min: 1.0, max: 200.0, slideSpeed: 4.0, decimalPlaces: 2.0},
+  eventDrop        : {type: "float", value: 0.0, min: 0.0, max: 0.99, slideSpeed: 1.0, decimalPlaces: 3.0},
+  drawColors       : {
+    type         : "enum",
+    value        : 3,
+    def          : ColorOptions2,
+    useCheckBoxes: true,
+    onchange     : function () {
+      window.redraw_all();
+    }
+  },
+  drawControlPoints: {type: "bool", value: true}
 };
 
 export class App extends simple.AppState {
   constructor() {
     super(Context);
+
+    this.brush = new Brush();
 
     this.mesh = undefined;
     this.properties = undefined;
@@ -45,6 +68,11 @@ export class App extends simple.AppState {
     let v4 = this.mesh.makeVertex([s + d, s, 0]);
 
     this.mesh.makeFace([v1, v2, v3, v4]);
+    let workspace = this.ctx.workspace;
+
+    if (workspace) {
+      workspace.toolmode.reset();
+    }
   }
 
   saveStartupFile() {
@@ -76,13 +104,13 @@ export class App extends simple.AppState {
     }
 
     return super.saveFileSync([
-      this.mesh
+      this.mesh, this.properties, this.brush
     ], args);
   }
 
   saveFile(args = {}) {
     return new Promise((accept, reject) => {
-      accept(this.saveFileSync([this.mesh, this.properties], args));
+      accept(this.saveFileSync([this.mesh, this.properties, this.brush], args));
     });
   }
 
@@ -94,7 +122,11 @@ export class App extends simple.AppState {
     let file = super.loadFileSync(data, args);
     this.mesh = file.objects[0];
     this.properties = file.objects[1] ?? this.properties;
+    this.brush = file.objects[2] ?? this.brush;
 
+    this.properties.patchTemplate(Properties);
+
+    console.log(file);
     window.redraw_all();
 
     return file;

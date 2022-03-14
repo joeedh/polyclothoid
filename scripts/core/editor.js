@@ -1,6 +1,11 @@
-import {simple, nstructjs, util, math, Vector2, UIBase, Icons, KeyMap, haveModal, ToolOp} from '../path.ux/pathux.js';
-import {getElemColor} from './mesh.js';
+import {
+  simple, nstructjs, util, math, Vector2, UIBase, Icons, KeyMap, haveModal, ToolOp, Menu
+} from '../path.ux/pathux.js';
+import {getElemColor} from '../stroker/mesh.js';
 import {MeshEditor} from './mesh_editor.js';
+import {BrushModes} from './brush.js';
+
+export const EditMenu = [];
 
 export class LoadDefaultsOp extends ToolOp {
   static tooldef() {
@@ -20,9 +25,19 @@ export class LoadDefaultsOp extends ToolOp {
 
 ToolOp.register(LoadDefaultsOp);
 
+simple.Editor.registerAppMenu(function (ctx, con, menubarEditor) {
+  con.menu("File", [
+    "app.new"
+  ]);
+
+  con.menu("Edit", EditMenu);
+});
+
 export class Workspace extends simple.Editor {
   constructor() {
     super();
+
+    this._last_update_key = undefined;
 
     this.canvas = document.createElement("canvas");
     this.g = this.canvas.getContext("2d");
@@ -47,7 +62,21 @@ export class Workspace extends simple.Editor {
       }
 
       let mpos = this.getLocalMouse(e.x, e.y);
-      this.toolmode.on_mousedown(mpos[0], mpos[1], e);
+      if (this.ctx.properties.brushMode === BrushModes.DEBUG) {
+        let [x, y] = this.getLocalMouse(e.x, e.y);
+
+        this.ctx.api.execTool(this.ctx, `brush.stroke(x=${x} y=${y} haveXY=true)`, {
+          x, y, haveXY: true
+        });
+      } else if (this.ctx.properties.brushMode === BrushModes.BASIC) {
+        let x = e.x, y = e.y;
+
+        this.ctx.api.execTool(this.ctx, `brush.test_stroke(x=${x} y=${y} haveXY=true)`, {
+          x, y, haveXY: true
+        });
+      } else {
+        this.toolmode.on_mousedown(mpos[0], mpos[1], e);
+      }
     });
 
     this.addEventListener("pointermove", (e) => {
@@ -114,6 +143,31 @@ export class Workspace extends simple.Editor {
 
     this.toolmode.ctx = this.ctx;
 
+    EditMenu.length = 0;
+    EditMenu.push(["Undo", () => this.ctx.toolstack.undo(), "CTRL-Z"]);
+    EditMenu.push(["Redo", () => this.ctx.toolstack.undo(), "CTRL-SHIFT-Z"]);
+    EditMenu.push(Menu.SEP);
+
+    let makeCB = (toolpath) => {
+      return () => this.ctx.api.execTool(this.ctx, toolpath);
+    }
+
+    for (let keymap of this.getKeyMaps()) {
+      for (let hk of keymap) {
+        if (typeof hk.action === "string") {
+          let tool = this.ctx.api.parseToolPath(hk.action);
+          let tdef = tool.tooldef();
+          let uiname = hk.uiname ?? tdef.uiname;
+
+
+          EditMenu.push([uiname, makeCB(hk.action), hk.buildString()]);
+        }
+      }
+    }
+
+    EditMenu.push("mesh.flip_edge");
+
+    //EditMenu.push(
     let sidebar = this.makeSideBar();
 
     let header = this.header;
@@ -132,6 +186,12 @@ export class Workspace extends simple.Editor {
     })
 
     row.tool("app.load_defaults()");
+    row.tool("app.reset()");
+
+    row.prop("brush.radius");
+    row.prop("brush.spacing");
+
+    row.prop("properties.brushMode");
 
     let tab;
     tab = sidebar.tab("Options");
@@ -165,6 +225,15 @@ export class Workspace extends simple.Editor {
     console.log("draw!");
 
     this.toolmode.draw(this.ctx, this.canvas, this.g);
+  }
+
+  update() {
+    let key = "" + this.size[0] + ":" + this.size[1];
+
+    if (key !== this._last_update_key) {
+      this._last_update_key = key;
+      window.redraw_all();
+    }
   }
 
   setCSS() {

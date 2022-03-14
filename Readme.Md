@@ -19,4 +19,8 @@ npm run-script setup
 node serv.js
 ```
 
+# Using Build
 
+Use `build/stroker.js`.
+Put a file `pathux.js` next to it that
+forwards to pathux.

@@ -4,7 +4,7 @@ import {
   Vec3Property, Vec4Property, Vec2Property, FlagProperty, keymap
 } from '../path.ux/pathux.js';
 
-import {Vertex, MeshTypes, MeshFlags} from './mesh.js';
+import {Vertex, MeshTypes, MeshFlags} from '../stroker/mesh.js';
 
 const VecProperty = (new Vertex()).length === 3 ? Vec3Property : Vec2Property;
 const Vector = (new Vertex()).length === 3 ? Vector3 : Vector2;
@@ -76,7 +76,7 @@ export class TransformVert extends TransformElem {
   }
 
   static create(mesh, selMask) {
-    let list = new TransformList(this.transformDefine().typeName, MeshTypes.VERTEX | MeshTypes.HANDLE);
+    let list = new TransformList(this.transformDefine().typeName, MeshTypes.VERTEX);
 
     let doList = (elist) => {
       for (let v of elist.selected.editable) {
@@ -170,7 +170,7 @@ export class TransformOp extends ToolOp {
   static tooldef() {
     return {
       inputs: {
-        selMask: new FlagProperty(MeshTypes.VERTEX | MeshTypes.HANDLE, MeshTypes),
+        selMask: new FlagProperty(MeshTypes.VERTEX, MeshTypes),
         center : new VecProperty()
       }
     }
@@ -219,6 +219,7 @@ export class TransformOp extends ToolOp {
   execPost(ctx) {
     this.transData = undefined;
     window.redraw_all();
+    ctx.mesh.regenSolve();
   }
 
   execPre(ctx) {
@@ -255,6 +256,7 @@ export class TransformOp extends ToolOp {
       TransformElem.getClass(k).undo(mesh, this._undoSelMask, this._undo[k]);
     }
 
+    ctx.mesh.regenSolve();
     window.redraw_all();
   }
 
@@ -303,6 +305,8 @@ export class TransformOp extends ToolOp {
 
     this.mpos.load(mpos);
     this._lastMpos.load(mpos);
+
+    ctx.mesh.regenSolve();
   }
 }
 
@@ -324,6 +328,8 @@ export class TranslateOp extends TransformOp {
 
   on_pointermove(e) {
     super.on_pointermove(e);
+
+    this.modal_ctx.mesh.regenSolve();
 
     let delta = new Vector2(this.mpos).sub(this.startMpos);
     delta = new Vector().loadXY(delta[0], delta[1]);
