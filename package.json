@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "build": "node tools/build.mjs",
+    "build:site": "node tools/build.mjs --minify && node tools/site.mjs",
     "serve": "node tools/serve.mjs",
     "typecheck": "tsgo --noEmit",
     "types": "tsgo --emitDeclarationOnly --declaration --outDir dist/types",
