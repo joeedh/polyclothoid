@@ -3,6 +3,9 @@
 A polynomial clothoid-based spline solver optimized for brush strokes, with a small
 vanilla-canvas demo for looking at what it produces.
 
+**[Try the demo →](https://joeedh.github.io/polyclothoid/)** (deployed from `master` by
+GitHub Actions)
+
 The curves are defined by a sampled curvature profile `k(s)` rather than by control
 points. Geometry is recovered by integrating `θ(s) = ∫k ds`, then `x = ∫cos θ ds`,
 `y = ∫sin θ ds`. Because `s` is arclength, the unit tangent is exactly `(cos θ, sin θ)`,
@@ -28,6 +31,10 @@ pnpm install
 ```
 
 ## Running the demo
+
+A build of `master` is live at
+[joeedh.github.io/polyclothoid](https://joeedh.github.io/polyclothoid/). To run it
+locally:
 
 ```
 pnpm serve
