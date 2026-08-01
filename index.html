@@ -1,12 +1,113 @@
 <!doctype html>
-<html>
-<head><title>Clothoid Tester</title></head>
-<script type="module">
-  import {start} from './scripts/core/app.js';
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>polyclothoid</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --panel-bg: #f2f2f4;
+        --panel-fg: #1a1a1c;
+        --panel-line: #d0d0d6;
+      }
 
-  window.init = function() {
-    start();
-  }
-</script>
-<body onload="init()"></body>
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --panel-bg: #202024;
+          --panel-fg: #e8e8ec;
+          --panel-line: #3a3a42;
+        }
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        font: 13px/1.4 system-ui, sans-serif;
+      }
+
+      #app {
+        display: flex;
+        height: 100%;
+      }
+
+      #view {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 100%;
+        touch-action: none;
+        cursor: crosshair;
+      }
+
+      #panel {
+        flex: 0 0 260px;
+        overflow-y: auto;
+        padding: 12px 14px;
+        background: var(--panel-bg);
+        color: var(--panel-fg);
+        border-left: 1px solid var(--panel-line);
+      }
+
+      #panel h2 {
+        margin: 14px 0 6px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.6;
+      }
+
+      #panel section:first-child h2 {
+        margin-top: 0;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 0;
+      }
+
+      .row > span {
+        flex: 1 1 auto;
+      }
+
+      .row input[type="range"] {
+        flex: 0 0 100px;
+      }
+
+      .row output {
+        flex: 0 0 44px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.7;
+      }
+
+      #panel button {
+        width: 100%;
+        margin-top: 6px;
+        padding: 5px;
+      }
+
+      #panel dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 10px;
+        margin: 0;
+        opacity: 0.75;
+      }
+
+      #panel dt {
+        font-family: ui-monospace, monospace;
+      }
+
+      #panel dd {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="./dist/demo.js"></script>
+  </body>
 </html>
