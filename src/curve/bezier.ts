@@ -1,6 +1,7 @@
 import { CacheRing, Vector2, clamp, fract, type VecLike } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
-import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { type CurveSolver, type SolvableMesh } from "./mesh_types.js";
+import { walk } from "./topology.js";
 import * as nstructjs from "nstructjs";
 
 const evalRets = new CacheRing(() => new Vector2(), 512);
@@ -258,15 +259,4 @@ export class BezierSolver implements CurveSolver {
       curve.update();
     }
   }
-}
-
-/** Step from `v` across whichever edge is not `e`; returns `v` at an endpoint. */
-function walk(v: SolvableVertex, e: SolvableEdge): SolvableVertex {
-  for (const e2 of v.edges) {
-    if (e2 !== e) {
-      return e2.otherVertex(v);
-    }
-  }
-
-  return v;
 }

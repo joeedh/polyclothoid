@@ -1,5 +1,6 @@
 export { Curve, type Canvas2DLike, type CanvasPaint, type CurveEdge, type CurveVertex } from "./curve.js";
 export { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+export { walk } from "./topology.js";
 
 export {
   Clothoid,

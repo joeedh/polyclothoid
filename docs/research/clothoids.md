@@ -97,8 +97,9 @@ canonical units on a unit chord:
 | 11 | 2.2e-4 | | 76 | 1.2e-6 |
 
 The observed order oscillates between ~1 and ~4 rather than sitting at 3, and at low `N`
-the error is not even monotonic (N=3 beats N=4). That is knot aliasing: the profile has
-`order - 1` = 11 knots where θ drops to C², and below roughly `N = 11` the error is
+the error is not even monotonic (N=3 beats N=4). That is knot aliasing: `order` = 12
+samples give 11 intervals and so 10 interior knots, where κ is only C⁰ and θ therefore only
+C¹. Below roughly `N = 11` the error is
 dominated by where step boundaries fall relative to them, not by `ds³`. Aligning steps to
 knots cleans up the mid-range but does not rescue the low end. Dropping to the 3–4 steps
 a smooth curvature polynomial would allow requires removing the knots, i.e. §3's
@@ -242,8 +243,8 @@ the fixed entries are kept because several describe traps that are easy to reint
 | `derivative2` finite-differenced `derivative`, feeding noise into `curvature` | Fixed — analytic (§6). |
 | `linearCurvature` guarded its interpolation with `i2 < klen - 1`, so the last interval was flat at `ks[klen-2]` and **`ks[klen-1]` was never read**, while `integral` ramped to it. The two profile members described different functions | Fixed — `i2 <= klen - 1`. This is the defect that cost the integrator two orders of convergence (§4). |
 | Both members computed `t = fract(i1)` from the *unrounded* index and then indexed with `~~(i1 + 1e-5)`, pairing a `t` near 1 with an `i1` already past the knot — a spurious jump of one full sample on a 1e-5-wide window below every knot | Fixed. `t` is now derived from the same `i1` used to index, which makes the boundary continuous and removes the need for the snapping epsilon at all. |
-| `circleArc.curvature` indexes with `~~(s·(klen−1))`, i.e. intervals of width `1/(klen−1)`, but `circleArc.integral` accumulates with `ds = 1/klen`. The two disagree by exactly `(klen−1)/klen` — a systematic 8.3% error in θ at `klen = 12` | **Open.** Measured, not fixed: it is an unused code path, but §3 describes this profile as complete and switchable, and it is not. |
-| `curvatureConstraint` sets `flip = isV1e1 !== isV1e2` (`clothoid.ts:530`) while `tangentConstraint` negates when `isV1e1 === isV1e2` (`clothoid.ts:490`) — opposite tests for the same question, whether the two edges traverse the vertex in the same direction. When both edges have `v` as their `v1` the through-path traverses `e1` backwards and `κ` must flip, which the tangent version does and the curvature version does not | **Open.** Code reading, not yet verified at runtime. On the `enableG2: false` path, so unexercised. Fixing it inverts behaviour for anyone who has enabled G2. |
+| `circleArc.curvature` indexes with `~~(s·(klen−1))`, i.e. intervals of width `1/(klen−1)`, but `circleArc.integral` accumulates with `ds = 1/klen`. The two disagree by exactly `(klen−1)/klen` — a systematic 8.3% error in θ at `klen = 12` | **Won't fix.** Measured, not fixed: it is an unused code path, and the profile is slated for removal along with the b-spline curve type. §3 describes it as complete and switchable; it is neither, and it should not be used as a reference shape for quadrature measurements in the meantime. |
+| `curvatureConstraint` sets `flip = isV1e1 !== isV1e2` (`clothoid.ts:530`) while `tangentConstraint` negates when `isV1e1 === isV1e2` (`clothoid.ts:490`) — opposite tests for the same question, whether the two edges traverse the vertex in the same direction. When both edges have `v` as their `v1` the through-path traverses `e1` backwards and `κ` must flip, which the tangent version does and the curvature version does not | **Open.** The correct line is `const flip = isV1e1 === isV1e2;`. Derived independently twice from the code, not yet verified at runtime. Only reachable when `enableG2` is `true`, which is off by default, so it is unexercised. Fixing it inverts behaviour for anyone who has enabled G2. |
 
 The two fixed `piecewiseLinear` defects survived the TypeScript port unchanged; they are
 original defects, not port regressions. `piecewiseLinear.integral` is now the exact integral of
@@ -254,8 +255,10 @@ The first of those also made `enableG2` partly fictional: `endCurvature(e, false
 `ks[order - 1]`, so at every `v2` end the G2 projection and the corner-zeroing pass were
 both writing a value that had no effect on the geometry. Together with the open `flip`
 entry, that is two independent reasons the G2 path has never done what it claims — worth
-knowing before turning it on, which `docs/plans/spower-solver.md` intends to do by
-default.
+knowing before turning it on. `docs/plans/spower-solver.md` retires `enableG2` as a flag
+entirely — G2 is the floor of its continuity ladder rather than an option — but settling
+the `flip` question at runtime is Phase 1 of that plan, since every higher rung depends on
+the same orientation convention.
 
 Live gaps, as opposed to defects:
 

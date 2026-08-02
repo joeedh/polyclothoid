@@ -1,6 +1,7 @@
 import { CacheRing, Vector2, clamp } from "../math/index.js";
 import { Curve, type Canvas2DLike, type CurveEdge } from "./curve.js";
 import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { walk } from "./topology.js";
 import * as nstructjs from "nstructjs";
 
 export class BSplinePoint {
@@ -393,11 +394,4 @@ export class BSplineSolver implements CurveSolver {
       e.curve.init(e);
     }
   }
-}
-
-/** Step from `v` across whichever edge is not `e`; returns `v` at an endpoint. */
-function walk(v: SolvableVertex, e: SolvableEdge): SolvableVertex {
-  const e2 = v.otherEdge(e);
-
-  return e2 ? e2.otherVertex(v) : v;
 }
