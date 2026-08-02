@@ -1,9 +1,10 @@
 # Clothoid curves
 
-Notes on the generalized-clothoid curve primitive and the mesh solver that fits chains
-of them. Written against `scripts/stroker/clothoid.js` as of commit `25a68ae`; that file
-has since been ported to `src/curve/clothoid.ts`, and the defect table in §8 records
-which of the problems below were fixed on the way across. The math is unchanged.
+Notes on the generalized-clothoid curve primitive and the mesh solver that fits chains of
+them. Written against `src/curve/clothoid.ts` and `src/math/solver.ts`. The original was
+`scripts/stroker/clothoid.js`, deleted once the TypeScript port landed; git history has it
+if a behaviour needs checking against it. The math is unchanged by the port — §8 records
+what changed around it.
 
 ## 1. The formulation
 
@@ -24,6 +25,9 @@ Classic Euler spirals are the special case `k(s) = a·s`. Here `k` is an arbitra
 piecewise-linear function with `order` (= `KORDER` = 12) samples, so a segment can be a
 line, an arc, a true clothoid, or anything smoother.
 
+The reduce-algebra derivation of the quadrature terms in §4 is kept verbatim in the header
+comment of `clothoid.ts`.
+
 ## 2. Data layout
 
 `Clothoid.ks` is a single `Float64Array` of `KTOT` = 21 slots doing double duty:
@@ -39,26 +43,40 @@ line, an arc, a true clothoid, or anything smoother.
 `this._ks` is a `Float64Array` **view** over just the first `order` slots. The solver
 hands `_ks` to `Constraint` as the parameter array, which is what keeps the solver from
 perturbing the cached transform fields. This aliasing is load-bearing — the view and the
-backing array must stay the same element type.
+backing array must stay the same element type. `loadSTRUCT` rebuilds both after
+deserialization for the same reason.
+
+All the `K*` indices are exported, since a caller writing its own constraint needs
+`KSCALE` to compare curvatures across segments.
 
 ## 3. Curvature-profile samplers
 
-Three parallel functions supply `dk/ds`, `k`, and `∫k` over normalized `s ∈ [0, 1]`.
-Two complete sets exist; `funcs` selects between them:
+A profile is a `CurvatureProfile`: three mutually consistent members supplying `dk/ds`,
+`k`, and `∫k` over normalized `s ∈ [0, 1]`. `activeProfile` selects the one the integrator
+uses, and `setCurvatureProfile()` swaps it — a module-level switch, not per-curve state.
 
-- **`piecewise_linear` = `[dstep, step, istep]`** — active. `step` linearly interpolates
-  between samples; `istep`/`istep2` compute the *exact* integral of that piecewise-linear
-  function by trapezoid accumulation; `dstep` is a finite difference of `step`.
-- **`circle_arc`** — piecewise-constant curvature, i.e. a chain of circular arcs. Present
-  and correct, currently unused.
-- **`bstep` / `bernstein`** — an abandoned Bernstein-basis profile. Note `bstep` sums the
-  basis functions without weighting by `ks[i]`, so it is incomplete, not merely unused.
+- **`piecewiseLinear`** — the default and the only one the solver is exercised against.
+  `curvature` interpolates linearly between samples; `integral` computes the *exact*
+  integral of that piecewise-linear function by trapezoid accumulation, so it carries no
+  step error; `dCurvature` is a finite difference of `curvature` (`df = 1e-5`).
+- **`circleArc`** — piecewise-constant curvature, i.e. a chain of circular arcs. Complete
+  and switchable, currently unused. Kept because comparing formulations on identical input
+  is half the point of the project.
+- **`bernsteinCurvature`** — a bare function, not a `CurvatureProfile`, because its
+  integral has never been derived and without one it cannot drive `evaluate`. The original
+  additionally summed the basis functions without weighting by `ks[i]`, making it a
+  constant-1 profile regardless of input; that is fixed here, but it is still parked.
 
-The Readme's idea of a B-spline curvature function would slot in here as a fourth set.
+Getting `integral` wrong bends the curve without producing any visible error in the
+curvature plot, which is the argument for exact integrals over numeric ones.
+
+The Readme's idea of a B-spline curvature profile would slot in here as a fourth member,
+and would subsume `circleArc` (degree 0) and `piecewiseLinear` (degree 1) as special
+cases.
 
 ## 4. Integration — `quadrature()`
 
-19 fixed steps, 2nd-order Taylor expansion per step:
+`QUADRATURE_STEPS` = 19 fixed steps, 2nd-order Taylor expansion per step:
 
 ```
 dx = cos θ − k·sin θ·(ds/2) − (cos θ·k² + dk·sin θ)·(ds²/6)
@@ -68,16 +86,39 @@ dy = sin θ + k·cos θ·(ds/2) + (cos θ·dk − k²·sin θ)·(ds²/6)
 Integration runs over `s ∈ [−0.5, 0.5]`, so the canonical shape is built centered on the
 origin and placed afterwards.
 
+Expanding θ to second order (θ, `k`, `dk`) makes the per-step integral third-order
+accurate, so the scheme is `O(ds³)` globally. Measured against a dense reference, error in
+canonical units on a unit chord:
+
+| N | error | | N | error |
+|---|---|---|---|---|
+| 3 | 2.1e-3 | | 19 | 2.1e-5 |
+| 6 | 1.0e-3 | | 38 | 1.0e-5 |
+| 11 | 2.2e-4 | | 76 | 1.2e-6 |
+
+The observed order oscillates between ~1 and ~4 rather than sitting at 3, and at low `N`
+the error is not even monotonic (N=3 beats N=4). That is knot aliasing: the profile has
+`order - 1` = 11 knots where θ drops to C², and below roughly `N = 11` the error is
+dominated by where step boundaries fall relative to them, not by `ds³`. Aligning steps to
+knots cleans up the mid-range but does not rescue the low end. Dropping to the 3–4 steps
+a smooth curvature polynomial would allow requires removing the knots, i.e. §3's
+open question about the profile basis — not a change to the integrator.
+
+Until the two defects at the bottom of §8 were fixed, this was `O(ds)` instead: `N = 19`
+carried 1.3e-3 of error, sixty times the current figure, and adding steps barely helped.
+The step count was compensating for a broken third-order term.
+
 ## 5. Endpoint interpolation by similarity transform
 
 `_update()` is the key trick. It integrates the canonical shape once for each endpoint,
 then computes the offset / rotation / uniform scale that maps that shape's endpoints onto
 `v1 → v2`:
 
-```js
-ks[KOFFX]   = -s[0];  ks[KOFFY] = -s[1];
-ks[KSCALE]  = v1.vectorDistance(v2) / s.vectorDistance(e);
-ks[KTH]     = atan2(v2 - v1) - atan2(e - s);
+```ts
+ks[KOFFX]     = -s[0];  ks[KOFFY] = -s[1];
+ks[KSCALE]    = this.v1.vectorDistance(this.v2) / s.vectorDistance(e);
+ks[KARCSCALE] = 1.0 / ks[KSCALE];
+ks[KTH]       = atan2(v2 - v1) - atan2(e - s);
 ```
 
 So the curvature samples control **shape only**; endpoint interpolation is satisfied by a
@@ -87,117 +128,160 @@ everywhere in the solver — a curvature value in canonical space must be divide
 `KSCALE` to be comparable across segments of different length.
 
 `length` is `KSCALE`, and `evaluate(s)` maps world arclength back to canonical `s` via
-`KARCSCALE` before quadrature.
+`KARCSCALE` before quadrature. Recomputation is lazy: `update()` sets `recalc`, and every
+query calls `_update()` first if it is set.
 
 ## 6. Derivatives
 
-- `derivative(s)` — analytic, `(cos(θ + KTH), sin(θ + KTH))`.
-- `derivative2(s)` — forward finite difference of `derivative`, `df = 1e-4`.
-- `curvature(s)` — the standard cross-product formula on those two. An analytic path
-  (`funcs[1](...) * KARCSCALE`) exists but is disabled behind `if (0)`.
+All three are analytic. There is no finite differencing left on this path.
 
-Using a finite difference for the second derivative when the first is analytic is odd —
-`dθ/ds` is just `k(s)`, so `derivative2` could be `k·(−sin θ, cos θ)` exactly. Worth
-testing whether the FD noise here is what makes the analytic `curvature` path unusable.
+- `derivative(s)` — `(cos(θ + KTH), sin(θ + KTH))`.
+- `derivative2(s)` — `dθ/ds` is just `k(s)`, so this is `k` times the tangent rotated a
+  quarter turn: `k·(−sin θ, cos θ)`, with `k` scaled by `KARCSCALE` into world units.
+- `curvature(s)` — read straight off the profile, `activeProfile.curvature(...) *
+  KARCSCALE`. No cross product.
+
+`Curve.curvature` in the base class still carries the general cross-product formula
+`(x'y'' − y'x'') / |r'|³`; that is what bezier and b-spline use. `Clothoid` overrides it
+because the profile *is* the curvature, and going through the derivatives to recover a
+value it already holds is both slower and less accurate.
+
+The original finite-differenced `derivative` to get `derivative2` (`df = 1e-4`) and then
+ran the cross-product formula on the result, which is why its analytic curvature path sat
+disabled behind `if (0)` — the FD noise was the reason the two disagreed.
 
 ## 7. `ClothoidSolver`
 
-Fits an entire mesh of clothoid edges simultaneously via pathux `Solver` / `Constraint`.
+Fits an entire mesh of clothoid edges simultaneously via the vendored `Solver` /
+`Constraint` in `src/math/solver.ts`. Behaviour is configured by `ClothoidSolverOptions`,
+whose defaults reproduce the original exactly:
 
-1. Coerce every edge's `ks` to `Float64Array`, reset all curvatures to `0.001`, update.
-2. For each vertex with exactly two edges, add constraints (see below).
-3. Skip and flag "bad" vertices where the corner is sharper than ~72° (`th < PI*0.4`).
-4. `solver.solve(55, 0.7)` — 55 iterations, 0.7 relaxation.
-5. Re-update all edges, then force endpoint curvature to zero at the bad vertices.
+| Option | Default | Effect |
+|---|---|---|
+| `enableG2` | `false` | register `curv_c` alongside `tan_c` |
+| `progressiveRefinement` | `false` | coarse-to-fine solve, `order = 2 .. KORDER` |
+| `cornerThreshold` | `PI * 0.4` (~72°) | corners sharper than this are excluded from the solve |
+| `iterations` | `55` | passed to `solver.solve` |
+| `relaxation` | `0.7` | ditto |
+
+`solve()` then:
+
+1. Coerces every edge's `ks` to `0.001` and marks it dirty.
+2. For each vertex with exactly two edges, adds constraints (see below).
+3. Collects "bad" vertices, where the corner is sharper than `cornerThreshold`, into a
+   `corners` set and skips them.
+4. Runs `solver.solve(iterations, relaxation)` — once, or once per order level under
+   progressive refinement.
+5. Re-updates all edges, then forces endpoint curvature to zero on **both** edges at every
+   corner vertex.
 
 ### Constraints
 
-- **`tan_c`** (registered) — returns `acos(t1 · t2)` between the tangents of the two
-  edges meeting at a vertex, handling the sign flip when the shared vertex is `v1` on one
-  edge and `v2` on the other. This is the G1 continuity driver and is the only thing
-  actually solving right now.
-- **`curv_c`** (written, **`solver.add` commented out at line 573**) — G2 continuity, and
-  a deliberately different kind of constraint. It does not descend a gradient. It averages
-  the two endpoint curvatures in `1/KSCALE`-normalized space (`fac = 0.5`), writes them
-  straight back into `ks`, and returns `0.0`.
+- **`tan_c`** — returns `acos(t1 · t2)` between the tangents of the two edges meeting at a
+  vertex, handling the sign flip when the shared vertex is `v1` on one edge and `v2` on the
+  other. This is the G1 continuity driver and, at default options, the only thing actually
+  solving.
+- **`curv_c`** (registered only when `enableG2`) — G2 continuity, and a deliberately
+  different kind of constraint. It does not descend a gradient. It averages the two
+  endpoint curvatures in `1/KSCALE`-normalized space (`fac = 0.5`), writes them straight
+  back into `ks`, and returns `0.0`.
 
   This works *because* of how `Solver.solveStep` is written, not in spite of it. Returning
   `0.0` short-circuits the whole descent machinery twice over: `Constraint.evaluate`
-  returns at `solver.js:46` before finite-differencing any gradients, and `solveStep`
-  hits `if (r1 === 0.0) continue` at `solver.js:105` before touching the parameters. So
-  the constraint is invoked once per iteration purely for its side effects, and costs one
-  function call instead of `2 × order` evaluations.
+  returns early before finite-differencing any gradients, and `solveStep` hits
+  `if (r1 === 0.0) continue` before touching the parameters. So the constraint is invoked
+  once per iteration purely for its side effects, and costs one function call instead of
+  `2 × order` evaluations. Both call sites carry a comment saying so; see also
+  `CLAUDE.md` invariant 1.
 
   The effect is a **direct projection interleaved with the gradient-descent constraints**
   — Gauss-Seidel style. Each iteration `tan_c` descends toward tangent continuity, then
   `curv_c` projects the curvature endpoints halfway toward agreement. The `fac = 0.5`
   under-relaxation is what keeps the projection from fighting the descent. Registration
-  order matters here.
+  order matters, and `solve()` registers `tan_c` first on purpose.
 
-  Its `disabled` flag (`params[3]`) is the other half of the design: when tripped, it
-  decays both edges' curvature profiles by `0.98` per iteration instead of projecting —
-  a bail-out that relaxes a segment toward straight rather than letting it blow up.
-
-  Since it is structurally sound, `solver.add` being commented out reads as a G2 on/off
-  experiment toggle, not as a disabled-because-broken.
+  Its `disabled` flag on `JointParams` is the other half of the design: when tripped, it
+  decays both edges' curvature profiles by `0.98` per iteration instead of projecting — a
+  bail-out that relaxes a segment toward straight rather than letting it blow up. Nothing
+  currently sets it (see §8).
 
 ### Corner handling
 
-Corners sharper than ~72° are deliberately left as corners: excluded from the solve, then
-zeroed. This is the right call for brush strokes, but the threshold is a hard-coded magic
-number with no way to tune it per-stroke.
+Corners sharper than `cornerThreshold` are deliberately left as corners: excluded from the
+solve, then zeroed at both edges' shared end. The threshold used to be a hard-coded magic
+number; it is now an option, though still one global value rather than per-stroke or
+per-vertex.
 
-### Progressive refinement (dormant)
+### Progressive refinement (off by default)
 
-`changeOrder(order)` resamples every edge's curvature profile to a new sample count,
-intended for a coarse-to-fine solve (`order = 2 .. KORDER`, solving at each level). The
-whole path sits behind `if (0)` at line 581. It is the most promising dormant idea in the
-file — a 12-DOF-per-edge solve seeded from a converged 2-DOF solve should be far more
-robust than the current cold start from `0.001`.
+`changeOrder(mesh, order)` resamples every edge's curvature profile to a new sample count
+and rebuilds `_ks` over the first `order` slots. With `progressiveRefinement` on, `solve()`
+walks `order = 2 .. KORDER`, calling `solver.solve` at each level, so a 12-DOF solve is
+seeded from a converged 2-DOF one. That should be far more robust than the cold start from
+`0.001`, but it is untested — in the original the whole path sat behind `if (0)`.
 
-## 8. Known defects
+One wrinkle if it is turned on: the constraints capture `e._ks` at registration time, when
+`order` is still `KORDER`, so they keep stepping all 12 slots even while the curve reads
+only the first `order` of them. The views alias the same buffer so nothing is corrupted,
+and the dead slots finite-difference to a zero gradient, but each iteration pays for
+evaluations that cannot move anything.
 
-Ordered by whether they can bite today.
+## 8. Defect status
 
-**Live:**
+The original's defects, and what the port did with each. All but the last two are fixed;
+the fixed entries are kept because several describe traps that are easy to reintroduce.
 
-- **`mesh.order` does not exist.** Line 543 `const order = mesh.order` evaluates to
-  `undefined` — the string `order` appears nowhere in `mesh.js`. The bad-vertex cleanup
-  at lines 599–611 therefore does `ks[NaN] = 0.0`, which typed arrays silently ignore. So
-  corner-curvature zeroing only works on the `v === e.v1` branch; the `v2` branch is a
-  no-op. Should be `e1.curve.order`.
+| Defect | Status |
+|---|---|
+| `mesh.order` was undefined, so corner-curvature zeroing did `ks[NaN] = 0` — silently a no-op on a typed array — and only the `v === e.v1` branch ever took effect | Fixed. `setEndCurvature` indexes off `e.order`, and both branches run. |
+| `changeOrder` computed `temp[i1] + (temp[i2] - temp[i])*t`, meaning `temp[i1]` for the third index | Fixed. |
+| `changeOrder` built a `Float32Array` view over a `Float64Array` buffer and assigned it to `e._ks` rather than `e.curve._ks` | Fixed. Both matter — see §2 on why the view type is load-bearing. |
+| `bstep` summed the Bernstein basis without weighting by `ks[i]`, making it a constant-1 profile | Weighting fixed, but the profile is still incomplete: no integral (§3). |
+| `quadrature` computed a `dx`/`dy` pair that the next two lines overwrote | Deleted. |
+| `dstep`, `istep`, `istep2` had unreachable code after an early `return` | Deleted, keeping the live branch. |
+| `derivative2` finite-differenced `derivative`, feeding noise into `curvature` | Fixed — analytic (§6). |
+| `linearCurvature` guarded its interpolation with `i2 < klen - 1`, so the last interval was flat at `ks[klen-2]` and **`ks[klen-1]` was never read**, while `integral` ramped to it. The two profile members described different functions | Fixed — `i2 <= klen - 1`. This is the defect that cost the integrator two orders of convergence (§4). |
+| Both members computed `t = fract(i1)` from the *unrounded* index and then indexed with `~~(i1 + 1e-5)`, pairing a `t` near 1 with an `i1` already past the knot — a spurious jump of one full sample on a 1e-5-wide window below every knot | Fixed. `t` is now derived from the same `i1` used to index, which makes the boundary continuous and removes the need for the snapping epsilon at all. |
+| `circleArc.curvature` indexes with `~~(s·(klen−1))`, i.e. intervals of width `1/(klen−1)`, but `circleArc.integral` accumulates with `ds = 1/klen`. The two disagree by exactly `(klen−1)/klen` — a systematic 8.3% error in θ at `klen = 12` | **Open.** Measured, not fixed: it is an unused code path, but §3 describes this profile as complete and switchable, and it is not. |
+| `curvatureConstraint` sets `flip = isV1e1 !== isV1e2` (`clothoid.ts:530`) while `tangentConstraint` negates when `isV1e1 === isV1e2` (`clothoid.ts:490`) — opposite tests for the same question, whether the two edges traverse the vertex in the same direction. When both edges have `v` as their `v1` the through-path traverses `e1` backwards and `κ` must flip, which the tangent version does and the curvature version does not | **Open.** Code reading, not yet verified at runtime. On the `enableG2: false` path, so unexercised. Fixing it inverts behaviour for anyone who has enabled G2. |
 
-**In dormant code (would bite if re-enabled):**
+The two fixed `piecewiseLinear` defects survived the TypeScript port unchanged; they are
+original defects, not port regressions. `piecewiseLinear.integral` is now the exact integral of
+`piecewiseLinear.curvature` to 1e-12, which is the contract `CurvatureProfile`'s doc
+comment states and the thing §3 warns is invisible in a curvature plot when broken.
 
-- `changeOrder` line 405: `temp[i1] + (temp[i2] - temp[i])*t` — the third index should be
-  `i1`, not `i`.
-- `changeOrder` line 413: builds a `Float32Array` view over a `Float64Array` buffer, and
-  assigns it to `e._ks` rather than `e.curve._ks`. Both wrong; see §2 on why the view
-  type matters.
-- `bstep` ignores `ks` entirely (§3).
+The first of those also made `enableG2` partly fictional: `endCurvature(e, false)` reads
+`ks[order - 1]`, so at every `v2` end the G2 projection and the corner-zeroing pass were
+both writing a value that had no effect on the geometry. Together with the open `flip`
+entry, that is two independent reasons the G2 path has never done what it claims — worth
+knowing before turning it on, which `docs/plans/spower-solver.md` intends to do by
+default.
 
-**Cosmetic:**
+Live gaps, as opposed to defects:
 
-- `quadrature` lines 193–197 compute a `dx`/`dy` pair that lines 199–200 immediately
-  overwrite.
-- `dstep`, `istep`, `istep2` all have unreachable code after an early `return`.
+- **Nothing ever sets `JointParams.disabled`.** The blow-up bail-out in `curv_c` is
+  written and correct but unreachable; there is no divergence detector to trip it. If G2 is
+  turned on for real, that detector is the missing piece.
+- **No tests.** Every claim above about convergence is from eyeballing the canvas demo.
 
 ## 9. State of the file
 
-This is a research file, not settled code. Multiple formulations are kept side by side
-and switched with `if (0)` blocks, module-level `funcs` swaps, and commented-out
-`solver.add` calls. That is reasonable for exploration, but it means the version that
-actually runs is: piecewise-linear curvature, order 12, G1-only, cold-start, 55
-iterations. Everything else in the file is either an alternative under evaluation or
-dead.
+The port turned the original's `if (0)` blocks, module-level `funcs` swaps, and
+commented-out `solver.add` calls into named options and exported profiles, so the
+alternatives are now selectable from a caller rather than by editing the file. What
+changed is the switching mechanism, not which branch runs: the default configuration is
+still **piecewise-linear curvature, order 12, G1-only, cold-start from 0.001, 55
+iterations at 0.7 relaxation**.
 
 Next things worth trying, roughly in order of expected payoff:
 
-1. Fix `mesh.order` (§8) — real, silent, active.
-2. Re-enable progressive refinement (§7) as a proper coarse-to-fine solve.
-3. Register `curv_c` and evaluate G2 (§7). It is a projection by design, not a residual —
+1. Turn on `progressiveRefinement` and see whether coarse-to-fine actually beats the cold
+   start. Fix the stale-`_ks` waste noted in §7 if it does.
+2. Turn on `enableG2` and evaluate. `curv_c` is a projection by design, not a residual —
    the open question is whether the projection and `tan_c`'s descent converge together,
    and whether `fac = 0.5` is the right under-relaxation. Registration order matters.
-4. Make `derivative2` analytic and re-test the analytic `curvature` path.
-5. The Readme's B-spline curvature profile — drops in at §3 and would subsume
-   `circle_arc` (degree 0) and `piecewise_linear` (degree 1) as special cases.
+3. Add the divergence detector that trips `disabled`, without which G2 has no bail-out.
+4. Try `circleArc` against `piecewiseLinear` on the same stroke input; the switch is one
+   `setCurvatureProfile` call now.
+5. The Readme's B-spline curvature profile — drops in at §3 and would subsume `circleArc`
+   (degree 0) and `piecewiseLinear` (degree 1) as special cases.

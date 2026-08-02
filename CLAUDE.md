@@ -130,6 +130,12 @@ tracked the TypeScript port and is now complete — keep it as the record of why
 shaped the way they are, and start a new plan doc for new work rather than reopening it.
 Update plan docs as work lands rather than at the end.
 
+`docs/research/spower.md` is background reading, not a description of anything in `src/`:
+Sánchez-Reyes' s-power series, a two-point Taylor analogue whose truncations are Hermite
+interpolants, and the 2003 result that approximates clothoids with them. Nothing is
+implemented — treat it as a survey of a possible direction, and note that its `s` is a
+symmetric parameter `(1−u)u`, not this codebase's arclength `s`.
+
 ## Layout
 
 ```

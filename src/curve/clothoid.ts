@@ -69,16 +69,18 @@ export interface CurvatureProfile {
   integral(ks: Float64Array, klen: number, s: number): number;
 }
 
+/*
+  `t` is derived from the same `i1` used to index, so the piece boundary is continuous and
+  needs no snapping epsilon. Deriving it independently (`fract` of the unrounded index)
+  pairs a t near 1 with an i1 already bumped past the knot.
+*/
 function linearCurvature(ks: Float64Array, klen: number, s: number) {
-  let i1 = s * (klen - 1);
-  const t = fract(i1);
-
-  i1 = ~~(i1 + 0.00001);
-
+  const si = s * (klen - 1);
+  const i1 = ~~si;
   const i2 = i1 + 1;
 
-  if (i2 < klen - 1) {
-    return ks[i1] + (ks[i2] - ks[i1]) * t;
+  if (i2 <= klen - 1) {
+    return ks[i1] + (ks[i2] - ks[i1]) * clamp(si - i1, 0.0, 1.0);
   }
 
   return ks[i1];
@@ -109,12 +111,10 @@ export const piecewiseLinear: CurvatureProfile = {
   integral(ks, klen, s) {
     const klen2 = klen - 1;
 
-    let i1 = s * (klen - 1);
-    const t = fract(i1);
+    const si = s * klen2;
+    const i1 = ~~si;
+    const i2 = clamp(i1 + 1, 0, klen2);
 
-    i1 = ~~(i1 + 0.00001);
-
-    const i2 = clamp(i1 + 1, 0, klen - 1);
     let sum = 0.0;
 
     for (let i = 0; i < i1; i++) {
@@ -122,7 +122,7 @@ export const piecewiseLinear: CurvatureProfile = {
     }
 
     if (i2 !== i1) {
-      sum += rampIntegral(ks[i1], ks[i2], t) / klen2;
+      sum += rampIntegral(ks[i1], ks[i2], clamp(si - i1, 0.0, 1.0)) / klen2;
     }
 
     return sum;
