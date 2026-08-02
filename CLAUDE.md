@@ -19,6 +19,7 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 | Typecheck | `pnpm typecheck` (native `tsgo`, not `tsc`) |
 | Bundle | `pnpm build` (esbuild) |
 | Dev server | `pnpm serve` (esbuild's own HTTP server, port 8080) |
+| Pages bundle | `pnpm build:site` (minified build, then assemble `site/`) |
 | Format | `pnpm format` (`@pathtx/prettier`, a fork — not upstream prettier) |
 | Lint | `pnpm lint` (typescript-eslint, flat config) |
 | Declarations | `pnpm types` (`tsgo --emitDeclarationOnly` to `dist/types`) |
@@ -27,6 +28,30 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 `@pathtx/prettier` supplies the `alignPropertyValues: "group"` option that produces the
 aligned-colon object style used throughout this codebase. Upstream prettier will reformat
 those blocks incorrectly — do not swap it out.
+
+## Deployment
+
+The demo is published to GitHub Pages at <https://joeedh.github.io/polyclothoid/> by
+`.github/workflows/pages.yml`, on every push to `master` plus `workflow_dispatch`. The
+build job gates on `pnpm typecheck`, runs `pnpm build:site`, and uploads `site/`; a second
+job deploys it. `site/` is generated and gitignored — never commit it.
+
+Three things about that setup are load-bearing:
+
+1. **`site/` mirrors the repo root rather than flattening.** `index.html` loads
+   `./dist/demo.js` by relative path, so `tools/site.mjs` copies the bundle to
+   `site/dist/demo.js`. That relative path is also what makes the `/polyclothoid/` Pages
+   subpath work without a base href. Do not hoist the bundle to `site/`.
+
+2. **`tools/site.mjs` writes a `.nojekyll` marker.** Without it Pages runs the output
+   through Jekyll, which drops paths beginning with an underscore.
+
+3. **`pnpm/action-setup` must run before `actions/setup-node`.** `setup-node`'s
+   `cache: pnpm` shells out to pnpm to locate the store, so the reverse order fails the
+   job outright.
+
+The Pages source is configured as **GitHub Actions** in repo settings, not a branch.
+`actions/configure-pages` fails with a bare `Not Found` if that ever gets switched back.
 
 ## TypeScript style
 
@@ -115,8 +140,9 @@ src/
   mesh/           the spline mesh the solver runs over
   stroke.ts       the brush stroker itself
   demo/           canvas harness, vanilla TS, no UI library
-tools/            esbuild build and serve scripts
+tools/            esbuild build and serve scripts, plus site.mjs (Pages assembly)
 docs/             see above
+.github/workflows/  pages.yml — build and deploy the demo
 ```
 
 The curve type is a runtime choice, not an import-time one: `Mesh` holds `CurveCls` and
