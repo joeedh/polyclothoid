@@ -855,7 +855,7 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
-**Status: 0a, 0b, 1, 2, 3, 4, 5, 6 and 7 are done; both gates passed.** See §14 for the
+**Status: 0a, 0b, 1, 2, 3, 4, 5, 6, 7, 8 and 9 are done; both gates passed.** See §14 for the
 measurements.
 Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
 predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
@@ -1034,6 +1034,54 @@ at level 0 has nothing left to give. It becomes real as soon as authored junctio
 
 **Phase 9 — width as a second profile.** The bounded-variable QP, the data term, the
 `h·|κ| < 1` check (§10). *Medium.*
+
+§10's structural claim held all the way down. `src/curve/width.ts` reuses the basis, the
+blocks, the layout, the band and the Schur complement unchanged, and the three differences
+§10 names are the whole of the new code. But each of them turned out to have a consequence
+§10 does not mention, and those consequences are what the phase is really about.
+
+**No constraint rows means the levels shift.** §10 says width uses "the same authored pairing
+levels", and it cannot quite: a `κ` level of `1` buys a G1 row and shares no entries, because
+sharing the curvature value does not make the tangents agree. Width has no row to buy — two
+ends reading the same order-0 entry *is* continuity — so level `k` on the width channel shares
+entries `0 … k−1` against `κ`'s `0 … k−2`. That is one line in `pairing.ts`, and without it a
+level-1 width joint would share nothing and be a hard step. `ChannelRules` makes the shift a
+per-channel policy rather than a special case, and `Pairing` gained a `channel` field so §10's
+independence — "a hard width discontinuity is a level-0 pairing on the width profile,
+independent of the level `κ` carries at that joint" — is a fact about the data model rather
+than a convention.
+
+**The bound is not the constraint.** §10 asks for `w ≥ w_min` and the unknowns that carry a
+width are the order-0 entries, so what the active set enforces is `w ≥ w_min` *at the
+vertices*. Between two vertices the profile is a degree-`2p+1` polynomial and nothing stops it
+diving; the real constraint is semi-infinite and this is its collocation at the joints. On
+data that ramps through zero the vertex bound holds exactly and the interior reaches `−2.07`
+against a floor of `0.25`. Rather than hide that, `WidthSolverReport.undershoot` reports it —
+adding the worst interior point as a new bound and re-solving is the standard cutting-plane
+fix, costs a factorization per cut, and is not what §10 asked for.
+
+**The bound also has to survive the interface**, which it does for a reason worth naming. A
+width does not change sign when you walk the other way, so its orientation sign is `(−1)ⁿ`
+where `κ`'s is `(−1)ⁿ⁺¹` — and order 0 is even, so every end mirroring a shared width value
+mirrors it with `+1` and `γ ≥ w_min` is the same inequality as `w ≥ w_min`. Had the parity
+gone the other way the bound would have been meaningless on any interface entry. The same
+`ScalarKind` split carries the other half of the transform difference: width has no leading
+`L_e` where `q = L_e·κ` has one, because a width is a length the stroker wants in world units.
+
+**The energy's chord exponent is 1, not 3.** Two independent reasons compose to the same
+answer — `ŵ` lacks the leading `L_e`, and §6 measures per unit `u` where this measures per
+unit `s` — and the test of it is that a ramp cut into more pieces has the same energy. It also
+makes the smoothing weight dimensional: a squared width against a width squared per length, so
+the knob is scaled internally by the mean chord and is dimensionless. A drawing zoomed by
+`1000×` then produces the identical fit to every digit.
+
+**The bug this phase had was the multiplier's right-hand side.** `build()` folds the active set
+into `b` — clamped columns subtracted out of the free rows, clamped rows overwritten by their
+bounds — and the multiplier of a clamped unknown is `(Kz − b)` against the *unclamped* one.
+Reading it off the folded `b` compares the gradient against `w_min` instead of against zero,
+and the set oscillates: the same three unknowns clamped and released until the iteration cap,
+16 passes where 2 suffice. It converges to a feasible point anyway, which is exactly what makes
+it worth recording — the only visible symptom was the iteration count.
 
 ## 13. What this does not fix, and what could go wrong
 
@@ -1596,6 +1644,97 @@ consistent for two and wrong for three, because *opposed iff same `end`* is not 
 all-pairs three-arm star that scheme converged in 12 steps to G1 `2.7e-11` and G2 **`4.12`**.
 Reading the signs off the same spanning tree the G1 rows already use gives the same 12 steps,
 the same G1, and G2 `7.97e-27`.
+
+### Phase 9 — width as a second profile (`tests/width.test.ts`)
+
+**The width interface is smaller than the curvature one at the same junction, and has no rows
+in it.** A star of `k` arms, every consecutive pair authored on *both* channels at the same
+level, `p = 1`. `m` is the Schur complement's dimension; `n` is the width system's total
+unknown count:
+
+| arms | level | `κ` `m` | of which rows | width `m` | of which rows | width `n` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 1 | 0 | 0 | 0 | 0 | 11 |
+| 2 | 2 | 0 | 0 | 0 | 0 | 10 |
+| 3 | 1 | 2 | 2 | 1 | 0 | 16 |
+| 3 | 2 | 3 | 2 | 2 | 0 | 14 |
+| 4 | 1 | 3 | 3 | 1 | 0 | 21 |
+| 4 | 2 | 4 | 3 | 2 | 0 | 18 |
+| 6 | 1 | 5 | 5 | 1 | 0 | 31 |
+| 6 | 2 | 6 | 5 | 2 | 0 | 26 |
+
+Two things are visible here and both are §10 differences rather than accidents. `κ` at level 1
+is *entirely* rows — `m = k − 1` multipliers and no shared entries — where width at level 1 is
+entirely entries, `m = 1` however many arms meet: one value, read by all of them. And width's
+`m` never exceeds `p + 1` at a node, because there is no tangent group to spend rows on. The
+whole width system is symmetric positive definite; there is no saddle point anywhere in it.
+
+**The bounded QP converges in two passes and clamps exactly the vertices that need it.** A
+four-edge strip, data ramping `2 → −2` across it, floor `0.25`. `min` and `max` are over 33
+probes per edge, so they see the interior the bound does not:
+
+| smoothing | passes | clamped | rms | vertex min | interior min | max |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1e-4 | 2 | 3 | 7.05e-1 | 0.25 | −2.073 | 2.021 |
+| 1e-2 | 2 | 3 | 7.06e-1 | 0.25 | −1.980 | 2.008 |
+| 0.05 | 2 | 3 | 7.15e-1 | 0.25 | −1.679 | 1.968 |
+| 0.5 | 2 | 3 | 8.37e-1 | 0.25 | −0.565 | 1.756 |
+| unbounded | 1 | 0 | 1.35e-2 | −1.958 | −1.958 | — |
+
+Three of the five vertices carry data at or below zero and exactly three clamp, at every
+smoothing weight — the set is a property of the data, not of the regularizer. The rms rises by
+`50×` against the unbounded fit, which is what a bound that is actually binding looks like: the
+data asks for a negative width and the answer refuses. The interior column is the collocation
+gap, and it closes as smoothing rises without ever reaching zero.
+
+**Smoothing trades against the data monotonically, and the trade is scale-free.** A sine of
+amplitude 1 sampled 7× per edge over four edges:
+
+| smoothing | rms | fitted span |
+| --- | --- | --- |
+| 1e-4 | 4.47e-3 | 1.9977 |
+| 1e-2 | 6.98e-3 | 1.9890 |
+| 0.05 | 2.49e-2 | 1.9531 |
+| 0.5 | 1.59e-1 | 1.6104 |
+| 5 | 4.88e-1 | 0.6590 |
+
+The same fixture zoomed by `10×` and `1000×`, with the widths scaled to match, gives
+`rms / z = 2.4860e-2` and `min / z = 0.034247746` at all three — identical to every printed
+digit, which is the mean-chord normalization doing its job. A bare smoothing weight would have
+varied as `z`.
+
+**The energy exponent is measurable in one number.** A ramp of total drop 3 over total length
+4, cut into 1, 2, 4 and 8 pieces, has energy `9/4` in every case to `1e-9`. At chord power 3 —
+`κ`'s exponent — the one-piece figure is `103.5`.
+
+**The cusp check fires where the offset really does turn inside out.** A regular octagon on the
+unit circle, `κ = 1`, at constant width:
+
+| width | half-width `h` | product | edges reporting |
+| --- | --- | --- | --- |
+| 0.5 | 0.25 | 0.25 | 0 |
+| 1.5 | 0.75 | 0.75 | 0 |
+| 1.9 | 0.95 | 0.95 | 0 |
+| 2.0 | 1.00 | 1.00 | 0 |
+| 4.0 | 2.00 | 2.00 | 8 |
+
+Width 2.0 is the boundary case and reports nothing, the computed product landing a rounding
+error under `1`; that is the right side to fail on for a diagnostic whose threshold is exactly
+`h = 1/κ`. Nothing about the solve changes when it fires — the same fixture with cusps reported
+still carries width `4.0 ± 1e-4` everywhere, because §10 makes the response stroker policy.
+
+**One solve, and it stays banded.** A straight strip sampled 5× per edge:
+
+| edges | unknowns | passes | ms |
+| --- | --- | --- | --- |
+| 4 | 10 | 1 | 0.4 |
+| 16 | 34 | 1 | 1.4 |
+| 64 | 130 | 1 | 7.5 |
+| 256 | 514 | 1 | 25.8 |
+
+Linear in the edge count, and one pass throughout because nothing binds. The `κ` solve that has
+to run first is four to eight Newton steps; the width solve on top of it is one factorization
+per component plus one more per active-set change.
 
 ## 15. References
 

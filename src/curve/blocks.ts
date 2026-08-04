@@ -127,29 +127,60 @@ export interface EdgeFrame {
 }
 
 /**
+ * What distinguishes one scalar profile's transform from another's — §10.
+ *
+ * Two questions, and they are the only two. **How the canonical profile is normalized**: `κ`'s
+ * is `q(u) = L_e·κ(L_e u)`, carrying one power of `L_e` so that `∫q du` is the turning
+ * outright; width's is `ŵ(u) = w(L_e u)`, carrying none, because a width is a length and the
+ * stroker wants it in world units. **Whether the field flips with the direction of travel**:
+ * signed curvature does, a width does not.
+ *
+ * Everything else — the `(L_e/Rᵥ)ⁿ` rescale, the `(−1)ⁿ` parameter reversal, the `g`-side
+ * convention — is common, which is why this is two flags rather than two transforms.
+ */
+export interface ScalarKind {
+  /** Powers of `L_e` the canonical profile carries on top of the `(L_e/Rᵥ)ⁿ` rescale. */
+  readonly leading: number;
+
+  /** Whether the field itself changes sign when the direction of travel reverses. */
+  readonly signed: boolean;
+}
+
+export const curvatureKind: ScalarKind = { leading: 1, signed: true };
+export const widthKind: ScalarKind = { leading: 0, signed: false };
+
+/**
  * Where entry `order` of one edge-end's block lands in the edge's Taylor data, and scaled by
  * what — one column of `M_e` before {@link taylorToPairs} spreads it over the pairs.
  *
  * `far` picks the `g`-side, the expansion in `1 − u`; see the orientation note above. The
- * weight is the `Rᵥ → L_e` rescale times the parity sign. Both halves are here rather than
- * inline in {@link edgeTransform} because §9's continuation has to *invert* them, and a
- * transform whose inverse is written out separately is a transform with two conventions.
+ * weight is the `Rᵥ → L_e` rescale times the parity sign, which factors into two independent
+ * halves: `(−1)ⁿ` on the `g`-side because that series is expanded in `1 − u`, and — on a
+ * backwards edge — the reversal, `(−1)ⁿ⁺¹` for a signed field and `(−1)ⁿ` for an unsigned one.
+ * Both are here rather than inline in {@link scalarTransform} because §9's continuation has to
+ * *invert* them, and a transform whose inverse is written out separately is a transform with
+ * two conventions.
  */
-export function transformEntry(frame: EdgeFrame, earlier: boolean, order: number) {
+export function scalarEntry(frame: EdgeFrame, earlier: boolean, order: number, kind: ScalarKind) {
   const { arclength, rEarlier, rLater, forward } = frame;
 
-  const scale = arclength * Math.pow(arclength / (earlier ? rEarlier : rLater), order);
-  const even = (order & 1) === 0;
+  const scale = Math.pow(arclength, kind.leading) * Math.pow(arclength / (earlier ? rEarlier : rLater), order);
 
-  let sign: number;
+  const parity = (order & 1) === 0 ? 1.0 : -1.0;
+  const far = earlier !== forward;
 
-  if (forward) {
-    sign = earlier ? 1.0 : even ? 1.0 : -1.0;
-  } else {
-    sign = earlier ? -1.0 : even ? -1.0 : 1.0;
+  let sign = far ? parity : 1.0;
+
+  if (!forward) {
+    sign *= kind.signed ? -parity : parity;
   }
 
-  return { far: earlier !== forward, weight: sign * scale };
+  return { far, weight: sign * scale };
+}
+
+/** {@link scalarEntry} for curvature — the `κ` transform every phase before §10 uses. */
+export function transformEntry(frame: EdgeFrame, earlier: boolean, order: number) {
+  return scalarEntry(frame, earlier, order, curvatureKind);
 }
 
 /**
@@ -168,7 +199,7 @@ export function transformEntry(frame: EdgeFrame, earlier: boolean, order: number
  * `s = L_e·u`. Note `g_n` carries an extra `(−1)ⁿ` because the far-end Taylor series is
  * expanded in `1 − u`, matching {@link taylorToPairs}'s convention.
  */
-export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
+export function scalarTransform(p: number, frame: EdgeFrame, kind: ScalarKind, out?: Float64Array) {
   const n = sPowerLength(p);
   const m = out ?? new Float64Array(n * n);
 
@@ -181,7 +212,7 @@ export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
   for (let c = 0; c < n; c++) {
     const earlier = c <= p;
     const order = earlier ? c : c - (p + 1);
-    const { far, weight } = transformEntry(frame, earlier, order);
+    const { far, weight } = scalarEntry(frame, earlier, order, kind);
 
     f.fill(0.0);
     g.fill(0.0);
@@ -195,6 +226,10 @@ export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
   }
 
   return m;
+}
+
+export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
+  return scalarTransform(p, frame, curvatureKind, out);
 }
 
 /**
@@ -351,6 +386,71 @@ export function edgeHessian(p: number, frame: EdgeFrame, alpha: number, out?: Fl
 }
 
 /**
+ * The width analogue of {@link edgeEnergy}: `(K + α²·M) / C_e`, row-major `(2p+2)²`.
+ *
+ * §10 asks for "the same `∫(w′)²` energy for smooth taper", and the natural reading of that
+ * for a width is the world-arclength Dirichlet energy `∫(dw/ds)² ds`, which on the canonical
+ * profile `ŵ(u) = w(L_e u)` is `(1/L_e)∫₀¹ ŵ′(u)² du`. Chord for arclength for §6's reason —
+ * it keeps the matrix constant across the solve, and it strengthens rather than weakens the
+ * regularizer on a degenerate edge.
+ *
+ * The chord power is `1` where {@link edgeEnergy}'s is `3`, and the gap is not a discrepancy:
+ * `q = L_e·κ` carries a factor of `L_e` that `ŵ` does not, and §6 measures `κ` per unit `u`
+ * where this measures `w` per unit `s`. `α` plays the same edit-locality role in both.
+ *
+ * Unlike curvature's, this quantity is *dimensional* — a length, against a data term that is
+ * a squared length — which is why the weight in front of it in `width.ts` is scaled by a
+ * reference length rather than used raw.
+ */
+export function widthEnergy(p: number, chord: number, alpha: number, out?: Float64Array) {
+  const n = sPowerLength(p);
+  const e = out ?? new Float64Array(n * n);
+
+  const k = stiffnessMatrix(p);
+  const mass = massMatrix(p);
+
+  const w = 1.0 / chord;
+  const a2 = alpha * alpha;
+
+  for (let i = 0; i < n * n; i++) {
+    e[i] = w * (k[i] + a2 * mass[i]);
+  }
+
+  return e;
+}
+
+/** {@link widthEnergy} pulled back onto vertex DOF, `M_eᵀ·E_e·M_e` with the width transform. */
+export function widthHessian(p: number, frame: EdgeFrame, alpha: number, out?: Float64Array) {
+  const n = sPowerLength(p);
+
+  return congruence(widthEnergy(p, frame.chord, alpha), scalarTransform(p, frame, widthKind), n, n, out);
+}
+
+/**
+ * Coefficient-space row `w` such that `w · a` is the s-power profile's value at `u`.
+ *
+ * Read straight off {@link evalSPower}'s Horner loop: pair `k` contributes
+ * `((1−u)·a_{2k} + u·a_{2k+1})·((1−u)u)^k`. This is what a data term is written against — §10's
+ * `Σ‖w(sᵢ) − pᵢ‖²` needs the value at a sample, where `κ`'s solver only ever needed integrals.
+ */
+export function sPowerValueWeights(p: number, u: number, out?: Float64Array) {
+  const n = sPowerLength(p);
+  const row = out ?? new Float64Array(n);
+
+  const sym = (1.0 - u) * u;
+  let symK = 1.0;
+
+  for (let k = 0; k <= p; k++) {
+    row[2 * k] = (1.0 - u) * symK;
+    row[2 * k + 1] = u * symK;
+
+    symK *= sym;
+  }
+
+  return row;
+}
+
+/**
  * Row `wᵀ M_e` such that `row · dof` is the edge's total turning, length `2p+2`.
  *
  * `∫₀¹ q du = ∫₀^{L_e} κ ds` is the turning outright — no conversion factor, which is what
@@ -375,11 +475,25 @@ export function edgePullback(p: number, frame: EdgeFrame, w: ArrayLike<number>, 
   return rowTimesMatrix(w, edgeTransform(p, frame), n, n, out);
 }
 
+/** {@link edgePullback} across the width transform. */
+export function widthPullback(p: number, frame: EdgeFrame, w: ArrayLike<number>, out?: Float64Array) {
+  const n = sPowerLength(p);
+
+  return rowTimesMatrix(w, scalarTransform(p, frame, widthKind), n, n, out);
+}
+
 /** The edge's coefficient vector `a_e = M_e · dof`, with `dof` in chain order. */
 export function edgeCoefficients(p: number, frame: EdgeFrame, dof: ArrayLike<number>, out?: Float64Array) {
   const n = sPowerLength(p);
 
   return matrixTimesVector(edgeTransform(p, frame), dof, n, n, out);
+}
+
+/** {@link edgeCoefficients} across the width transform. */
+export function widthCoefficients(p: number, frame: EdgeFrame, dof: ArrayLike<number>, out?: Float64Array) {
+  const n = sPowerLength(p);
+
+  return matrixTimesVector(scalarTransform(p, frame, widthKind), dof, n, n, out);
 }
 
 /**
@@ -422,7 +536,7 @@ export function continuationEntry(p: number, frame: EdgeFrame, dof: ArrayLike<nu
  * square because an s-power edge has as many coefficients as it has DOF; nothing else here
  * depends on that.
  */
-export interface ProfileDOF {
+export interface ScalarProfileDOF {
   readonly name: string;
 
   /** The profile that integrates the coefficients {@link coefficients} produces. */
@@ -446,17 +560,6 @@ export interface ProfileDOF {
   /** Energy Hessian in DOF space, `(2·blockLength)²` row-major, symmetric PSD. */
   hessian(p: number, frame: EdgeFrame, alpha: number, out?: Float64Array): Float64Array;
 
-  /** Row whose dot with the edge's DOF is its total turning, length `2·blockLength`. */
-  turningRow(p: number, frame: EdgeFrame, out?: Float64Array): Float64Array;
-
-  /**
-   * The same total turning as a *coefficient*-space row, length {@link coefficientLength}.
-   *
-   * `turningRow` is this pulled back. The solver needs the unpulled form so it can add it to
-   * `∂KTH/∂a` before crossing the transform, rather than crossing twice.
-   */
-  turningWeights(p: number): ArrayLike<number>;
-
   /**
    * A coefficient-space row pulled back to DOF space, length `2·blockLength`.
    *
@@ -467,6 +570,30 @@ export interface ProfileDOF {
 
   /** Coefficients for one edge, from its two blocks concatenated in chain order. */
   coefficients(p: number, frame: EdgeFrame, dof: ArrayLike<number>, out?: Float64Array): Float64Array;
+
+  /** Coefficient-space row whose dot with the coefficients is the profile's value at `u`. */
+  valueWeights(p: number, u: number, out?: Float64Array): ArrayLike<number>;
+}
+
+/**
+ * A scalar profile that is also a *curvature* — §5's geometric coupling, which §10 wants
+ * isolated as `κ`'s peculiarity rather than carried by every profile.
+ *
+ * Turning is the whole of that peculiarity at this boundary. A width has an integral too, and
+ * nothing in the solve wants it: no constraint says the widths along a chain have to add up to
+ * anything.
+ */
+export interface ProfileDOF extends ScalarProfileDOF {
+  /** Row whose dot with the edge's DOF is its total turning, length `2·blockLength`. */
+  turningRow(p: number, frame: EdgeFrame, out?: Float64Array): Float64Array;
+
+  /**
+   * The same total turning as a *coefficient*-space row, length {@link coefficientLength}.
+   *
+   * `turningRow` is this pulled back. The solver needs the unpulled form so it can add it to
+   * `∂KTH/∂a` before crossing the transform, rather than crossing twice.
+   */
+  turningWeights(p: number): ArrayLike<number>;
 }
 
 /** The s-power profile as a {@link ProfileDOF}: Hermite blocks of `p + 1` derivatives. */
@@ -483,4 +610,26 @@ export const sPowerDOF: ProfileDOF = {
   turningWeights: integralWeights,
   pullback      : edgePullback,
   coefficients  : edgeCoefficients,
+  valueWeights  : sPowerValueWeights,
+};
+
+/**
+ * Width on the same blocks — {@link sPowerDOF} with the unsigned, `L_e`-free transform of
+ * {@link widthKind} and the arclength Dirichlet energy of {@link widthEnergy}.
+ *
+ * Deliberately a {@link ScalarProfileDOF} and not a {@link ProfileDOF}: it is the same basis
+ * and the same blocks, and the thing it does not have is a turning.
+ */
+export const widthDOF: ScalarProfileDOF = {
+  name      : "width",
+  profile   : sPowerProfile,
+  quadrature: defaultSPowerQuadrature,
+
+  blockLength,
+  coefficientLength: sPowerLength,
+
+  hessian     : widthHessian,
+  pullback    : widthPullback,
+  coefficients: widthCoefficients,
+  valueWeights: sPowerValueWeights,
 };

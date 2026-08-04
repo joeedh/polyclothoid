@@ -27,7 +27,7 @@
  */
 import { type Curve } from "./curve.js";
 import { type SolvableEdge, type SolvableVertex } from "./mesh_types.js";
-import { vertexPartitions } from "./pairing.js";
+import { curvatureChannel, vertexPartitions } from "./pairing.js";
 import { type Chain } from "./topology.js";
 
 /** Where one chain meets a junction: the outermost edge, and which of the chain's two ends. */
@@ -150,7 +150,7 @@ function groupsOf(labels: Int32Array) {
  * solved at. Continuation (§9) rebuilds this per rung for that reason — but see
  * {@link components} for why the *grouping* need not be rebuilt with it.
  */
-export function interfaceSlots<C extends Curve>(all: Chain<C>[], p: number) {
+export function interfaceSlots<C extends Curve>(all: Chain<C>[], p: number, channel = curvatureChannel) {
   const slots: GammaSlot[] = [];
 
   for (const [vertex, list] of chainEnds(all)) {
@@ -169,19 +169,21 @@ export function interfaceSlots<C extends Curve>(all: Chain<C>[], p: number) {
     const members = (group: number[]) =>
       group.map((i) => byEdge.get(vertex.edges[i])).filter((e): e is ChainEnd => e !== undefined);
 
-    const parts = vertexPartitions(vertex, p);
+    const parts = vertexPartitions(vertex, p, channel);
     const tangents = groupsOf(parts[0]).map(members);
 
     /*
       Orientation, along the same spanning tree the G1 rows use. Two ends agree on the direction
       through the node exactly when one arrives and the other leaves, so equal `end` is a flip —
       and a group of three or more cannot satisfy that pairwise, which is why it has to be read
-      off a tree rather than off every pair. An order-`n` group is contained in a tangent group,
-      sharing an entry needing level 2 where the tangent needs only 1, so the tree covers it.
+      off a tree rather than off every pair. Every other partition subdivides the coarsest one,
+      so a tree over that one covers them all; width's coarsest is order 0, not the tangents.
     */
-    for (const tangent of tangents) {
-      for (let k = 1; k < tangent.length; k++) {
-        tangent[k].reversed = tangent[k - 1].reversed !== (tangent[k].end === tangent[k - 1].end);
+    for (const group of groupsOf(parts[channel.coarsest])) {
+      const ends = members(group);
+
+      for (let k = 1; k < ends.length; k++) {
+        ends[k].reversed = ends[k - 1].reversed !== (ends[k].end === ends[k - 1].end);
       }
     }
 
@@ -221,8 +223,8 @@ function touched(slot: GammaSlot) {
  * every `p ≥ 0` can represent; lowering `p` only drops the *higher* shared orders, which
  * never groups two chains that were not already grouped by order `0`.
  */
-export function components<C extends Curve>(all: Chain<C>[], p: number): Component<C>[] {
-  const slots = interfaceSlots(all, p);
+export function components<C extends Curve>(all: Chain<C>[], p: number, channel = curvatureChannel): Component<C>[] {
+  const slots = interfaceSlots(all, p, channel);
   const parent = new Int32Array(all.length);
 
   for (let i = 0; i < all.length; i++) {

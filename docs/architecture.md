@@ -62,11 +62,12 @@ beside `Clothoid`/`ClothoidSolver` rather than replacing them:
 | `profile.ts` | Curvature profiles shared by both clothoid types. |
 | `quadrature.ts` | The Taylor position integrator with the step count as a parameter. |
 | `samples.ts` | The piecewise-linear profile as a DOF — §12's control experiment. |
-| `blocks.ts` | Vertex-owned curvature DOF, and the per-edge transform into s-power coefficients. |
-| `pairing.ts` | Continuity levels, and the per-order partitions they induce on a vertex. |
+| `blocks.ts` | Vertex-owned scalar DOF, and the per-edge transform into s-power coefficients. |
+| `pairing.ts` | Continuity levels per channel, and the per-order partitions they induce on a vertex. |
 | `topology.ts` | Nodes and chains: the mesh decomposed into maximal valence-2 runs. |
 | `junctions.ts` | The solve-side reading of that decomposition — which unknowns two chains share. |
 | `spower_solver.ts` | Gauss-Newton over a banded KKT system, with a Schur complement across chains. |
+| `width.ts` | The second profile: a bounded-variable QP fitting width to samples on the same chains. |
 | `diagnostics.ts` | Located, typed records of what the solver broke and why. |
 
 Unknowns live on **vertices**, not edges, which is why the solver needs topology at all: an
@@ -75,6 +76,16 @@ through shared storage before any constraint is written. `topology.ts` cuts the 
 chains so each one is a band; `junctions.ts` says what is left over, and `spower_solver.ts`
 eliminates onto it. `math/banded.ts` and `math/dense.ts` are the two factorizations that
 serve those halves — quasi-definite band for the chains, LU for the interface.
+
+Curvature is not the only thing that lives there. `width.ts` fits a second scalar profile over
+the same blocks, bands and interface, differing in the three ways the plan's §10 predicted: it
+has no constraint rows, so its system is positive definite rather than a saddle; it has a data
+term and a lower bound, so it is a quadratic program with an active set instead of a Newton
+loop; and its unknowns carry no leading arclength and do not flip sign when travel reverses, so
+`blocks.ts` parameterizes the transform by a `ScalarKind` rather than hard-coding `κ`'s. Pairing
+levels are per-`PairingChannel` for the same reason — a hard width step and a curvature corner
+are independent authoring decisions at the same joint. Width is solved *after* `κ`, never
+alongside it: its domain is arclength, and arclength is an output of the geometry solve.
 
 ## The two seams
 
@@ -201,7 +212,7 @@ export { Stroker, type StrokeCallback, type StrokerOptions } from "./stroke.js";
 | Mesh | `Mesh`, `Element`, `Vertex`, `Handle`, `Edge`, `Loop`, `LoopList`, `Face`, `ElementArray`, `ElementSet`, `MeshTypes`, `MeshFlags`, `RecalcFlags`, `CurveConstructor`, `CurveSolverConstructor`, `ElemColors`, `getElemColor` |
 | Curves | `Curve`, `Clothoid`, `ClothoidSolver`, `SPowerClothoid`, `SPowerSolver`, `CubicBezier`, `BezierSolver`, `BSpline`, `BSplinePoint`, `BSplineSolver` |
 | Curve support | `Canvas2DLike`, `CanvasPaint`, `CurveVertex`, `CurveEdge`, `SolvableMesh`, `SolvableEdge`, `SolvableVertex`, `CurveSolver`, `CurvatureProfile`, `activeProfile`, `setCurvatureProfile`, `piecewiseLinear`, `circleArc`, `sPowerProfile`, `bernsteinCurvature`, the `K*` parameter-slot indices, `ClothoidSolverOptions` |
-| S-power internals | Everything the s-power group's modules export, flat — the basis (`evalSPower`, `massMatrix`, …), the DOF layer (`edgeTransform`, `sPowerDOF`, …), levels (`maxLevel`, `vertexPartitions`, …), decomposition (`chains`, `cutOpen`, `components`, `interfaceSlots`), the solve (`ComponentSystem`, `SPowerSolverOptions`, `SolveReport`) |
+| S-power internals | Everything the s-power group's modules export, flat — the basis (`evalSPower`, `massMatrix`, …), the DOF layer (`edgeTransform`, `sPowerDOF`, …), levels (`maxLevel`, `vertexPartitions`, …), decomposition (`chains`, `cutOpen`, `components`, `interfaceSlots`), the solve (`ComponentSystem`, `SPowerSolverOptions`, `SolveReport`), and width (`WidthSolver`, `WidthSample`, `WidthSolverReport`) |
 | Math | `Vector2/3/4`, `VecLike`, `Vec3Mixin`, `applyVec3Mixin`, `CacheRing`, `IDGen`, `Constraint`, `Solver`, `fract`, `clamp`, `binomial`, `listRemove`, `time_ms` |
 
 Most consumers want `Stroker` and nothing else. The rest is exported because the demo needs

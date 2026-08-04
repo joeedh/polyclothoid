@@ -196,6 +196,19 @@ export function sampledDOF(samples = SAMPLE_COUNT): ProfileDOF {
     coefficients(p, frame, dof, out) {
       return matrixTimesVector(sampleTransform(p, frame, samples), dof, samples, sPowerLength(p), out);
     },
+
+    /* Hat functions: `u` lands in one span and only its two endpoints are nonzero. */
+    valueWeights(_p, u, out) {
+      const row = (out ?? new Float64Array(samples)).fill(0.0);
+
+      const t = Math.min(Math.max(u, 0.0), 1.0) * (samples - 1);
+      const i = Math.min(samples - 2, Math.floor(t));
+
+      row[i] = 1.0 - (t - i);
+      row[i + 1] = t - i;
+
+      return row;
+    },
   };
 }
 

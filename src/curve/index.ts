@@ -2,6 +2,7 @@ export { Curve, type Canvas2DLike, type CanvasPaint, type CurveEdge, type CurveV
 export {
   type CurveSolver,
   type Pairing,
+  type PairingChannel,
   type SolvableEdge,
   type SolvableMesh,
   type SolvableVertex,
@@ -11,6 +12,8 @@ export { chains, cutOpen, walk, type Chain } from "./topology.js";
 export { chainEnds, components, interfaceSlots, type ChainEnd, type Component, type GammaSlot } from "./junctions.js";
 
 export {
+  channelRules,
+  curvatureChannel,
   defaultLevel,
   findPairing,
   levelFor,
@@ -18,6 +21,8 @@ export {
   pairingLevel,
   sharing,
   vertexPartitions,
+  widthChannel,
+  type ChannelRules,
   type Sharing,
 } from "./pairing.js";
 
@@ -101,6 +106,7 @@ export {
   blockLength,
   congruence,
   continuationEntry,
+  curvatureKind,
   edgeCoefficients,
   edgeDOFLength,
   edgeEnergy,
@@ -113,9 +119,20 @@ export {
   referenceLength,
   rowTimesMatrix,
   sPowerDOF,
+  sPowerValueWeights,
+  scalarEntry,
+  scalarTransform,
   transformEntry,
+  widthCoefficients,
+  widthDOF,
+  widthEnergy,
+  widthHessian,
+  widthKind,
+  widthPullback,
   type EdgeFrame,
   type ProfileDOF,
+  type ScalarKind,
+  type ScalarProfileDOF,
 } from "./blocks.js";
 
 export {
@@ -139,6 +156,18 @@ export {
   type SPowerSolverOptions,
   type SPowerSolverReport,
 } from "./spower_solver.js";
+
+export {
+  WidthChain,
+  WidthComponent,
+  WidthSolver,
+  defaultWidthSolverOptions,
+  type WidthCusp,
+  type WidthSample,
+  type WidthSolverOptions,
+  type WidthSolverReport,
+  type WidthUndershoot,
+} from "./width.js";
 
 export { CubicBezier, BezierSolver, cubic } from "./bezier.js";
 export { BSpline, BSplinePoint, BSplineSolver, BSplineRecalc, dbasis } from "./bspline.js";

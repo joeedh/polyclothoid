@@ -10,16 +10,30 @@ import { type SolveReport } from "./diagnostics.js";
  * `docs/architecture.md`.
  */
 /**
+ * Which scalar profile a pairing's level speaks about — §10.
+ *
+ * Width is a profile on the same chains with the same blocks, and a joint may be a hard width
+ * step and a smooth curve at once, so the two levels are authored separately and read
+ * separately. An absent channel means `"curvature"`, which is what every pairing written
+ * before width existed meant.
+ */
+export type PairingChannel = "curvature" | "width";
+
+/**
  * An authored pairing of two edge-ends at a vertex, carrying a continuity level — §3.
  *
- * The level is a *ceiling*: the solver may deliver less (§8) and never more. `0` is a corner,
- * `1` is G1, and `k` shares block entries `0 … k−2` on top of the G1 row, up to `p + 2`.
- * Levels are authored by client mesh code; nothing in `curve/` infers one.
+ * The level is a *ceiling*: the solver may deliver less (§8) and never more. On the curvature
+ * channel `0` is a corner, `1` is G1, and `k` shares block entries `0 … k−2` on top of the G1
+ * row, up to `p + 2`; width has no row, so its `k` shares `0 … k−1` up to `p + 1`. Levels are
+ * authored by client mesh code; nothing in `curve/` infers one.
  */
 export interface Pairing {
   a: SolvableEdge;
   b: SolvableEdge;
   level: number;
+
+  /** Defaults to `"curvature"` when absent. */
+  channel?: PairingChannel;
 }
 
 export interface SolvableVertex extends CurveVertex {

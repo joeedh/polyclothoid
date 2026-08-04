@@ -4,6 +4,7 @@ import {
   ClothoidSolver,
   type Curve,
   type CurveSolver,
+  type PairingChannel,
   type SolvableMesh,
   emptySolveReport,
 } from "../curve/index.js";
@@ -65,9 +66,10 @@ export class VertexPairing {
     this,
     `
 mesh.VertexPairing {
-  a     : int | this.a.eid;
-  b     : int | this.b.eid;
-  level : int;
+  a       : int | this.a.eid;
+  b       : int | this.b.eid;
+  level   : int;
+  channel : string;
 }
 `
   );
@@ -76,13 +78,17 @@ mesh.VertexPairing {
   b!: Edge;
   level = 0;
 
-  constructor(a?: Edge, b?: Edge, level = 0) {
+  /** Which scalar profile this level speaks about — `curve/mesh_types.ts`. */
+  channel: PairingChannel = "curvature";
+
+  constructor(a?: Edge, b?: Edge, level = 0, channel: PairingChannel = "curvature") {
     if (a && b) {
       this.a = a;
       this.b = b;
     }
 
     this.level = level;
+    this.channel = channel;
   }
 }
 
@@ -115,9 +121,9 @@ mesh.Vertex {
     }
   }
 
-  /** The authored pairing of `a` and `b` here, in either order. */
-  pairing(a: Edge, b: Edge) {
-    return this.pairings.find((p) => (p.a === a && p.b === b) || (p.a === b && p.b === a));
+  /** The authored pairing of `a` and `b` here on one channel, in either order. */
+  pairing(a: Edge, b: Edge, channel: PairingChannel = "curvature") {
+    return this.pairings.find((p) => p.channel === channel && ((p.a === a && p.b === b) || (p.a === b && p.b === a)));
   }
 
   /**
@@ -126,14 +132,17 @@ mesh.Vertex {
    * A level at or above the ceiling is stored as authored and clamped when it is read, so
    * raising `p` later restores the continuity that was asked for rather than the one that
    * happened to fit.
+   *
+   * The channels are independent: a level-0 curvature pairing is a corner in the curve and
+   * says nothing about whether the width steps there.
    */
-  setPairing(a: Edge, b: Edge, level: number) {
-    const existing = this.pairing(a, b);
+  setPairing(a: Edge, b: Edge, level: number, channel: PairingChannel = "curvature") {
+    const existing = this.pairing(a, b, channel);
 
     if (existing) {
       existing.level = level;
     } else {
-      this.pairings.push(new VertexPairing(a, b, level));
+      this.pairings.push(new VertexPairing(a, b, level, channel));
     }
 
     return this;
@@ -1250,6 +1259,9 @@ mesh.Mesh {
       for (const pairing of v.pairings) {
         pairing.a = get<Edge>(pairing.a)!;
         pairing.b = get<Edge>(pairing.b)!;
+
+        /* Files written before §10's width channel have no field here at all. */
+        pairing.channel = pairing.channel || "curvature";
       }
 
       /* A pairing naming an edge that did not survive is not a corner, it is a dangling ref. */

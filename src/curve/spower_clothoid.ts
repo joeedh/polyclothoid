@@ -48,6 +48,7 @@ export class SPowerClothoid extends Curve {
     `
 SPowerClothoid {
   ks          : array(float);
+  ws          : array(float);
   order       : int;
   profileName : string;
 }
@@ -59,6 +60,19 @@ SPowerClothoid {
 
   /** The `2p + 2` s-power coefficients of the canonical profile `q(u) = L·κ(L·u)`. */
   ks = new Float64Array(sPowerLength(SPOWER_ORDER));
+
+  /**
+   * Width coefficients in the same basis, for the canonical profile `ŵ(u) = w(L·u)` — §10.
+   *
+   * Empty until a `WidthSolver` has run, which is a state the stroker has to handle anyway:
+   * §10's ordering constraint is that `κ` is solved first, so between the two solves every
+   * curve in the mesh is geometrically complete and has no width.
+   *
+   * No leading `L` here where {@link ks} has one. A width is a length and the stroker wants
+   * it in world units, so `ŵ` is `w` reparameterized and not rescaled — see `blocks.ts`'s
+   * `widthKind`.
+   */
+  ws = new Float64Array(0);
 
   /**
    * The basis `ks` is written in.
@@ -269,6 +283,25 @@ SPowerClothoid {
     return this.profile.integral(this.ks, this.klen, 1.0);
   }
 
+  /**
+   * Width at arclength `s`, or `NaN` where no width has been solved.
+   *
+   * `NaN` rather than a default so that a stroker reading a width nobody set produces visible
+   * nonsense instead of a plausible constant — §10 makes the width a solve output, and a curve
+   * that has not had one is not a curve with width 1.
+   */
+  width(s: number) {
+    if (this.ws.length === 0) {
+      return NaN;
+    }
+
+    if (this.recalc) {
+      this._update();
+    }
+
+    return this.profile.curvature(this.ws, this.ws.length, this._param(s));
+  }
+
   afterSTRUCT(v1: SolvableVertex, v2: SolvableVertex) {
     this.v1 = v1;
     this.v2 = v2;
@@ -283,6 +316,7 @@ SPowerClothoid {
     reader(this);
 
     this.ks = Float64Array.from(this.ks);
+    this.ws = Float64Array.from(this.ws ?? []);
     this.recalc = 1;
   }
 }
