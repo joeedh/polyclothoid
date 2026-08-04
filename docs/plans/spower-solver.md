@@ -1110,6 +1110,14 @@ it worth recording — the only visible symptom was the iteration count.
   energy does not select among them, and Newton will land in whichever basin the seed is in.
   Dragging a vertex can jump basins, which reads as a sudden flip. Needs an explicit turning
   number, either authored or carried as solve state — decide before Phase 8.
+
+  *Partly mitigated after Phase 9,* and it turned out not to be specific to closed loops: an
+  open three-vertex chain dragged through collinearity jumps to a nine-turn spiral (§14). The
+  mitigation is `SPowerSolverOptions.branchLimit`, a cumulative bound on how far one solve may
+  move an edge's turning, which holds a warm-started run on the branch it started from. That is
+  weaker than the fix described here — it preserves whatever branch the seed is on rather than
+  naming the one that is wanted, so it cannot *author* a turning number, and a cold solve of a
+  shape whose intended winding is not the nearest one still has no way to ask for it.
 - **Endpoint interpolation by similarity transform is assumed.** The alternative is dropping
   it and constraining position explicitly: two nonlinear rows per segment instead of two
   nonlinear scalars. Roughly a wash in count, worse in conditioning (world-unit position
@@ -1735,6 +1743,66 @@ still carries width `4.0 ± 1e-4` everywhere, because §10 makes the response st
 Linear in the edge count, and one pass throughout because nothing binds. The `κ` solve that has
 to run first is four to eight Newton steps; the width solve on top of it is one factorization
 per component plus one more per active-set change.
+
+### Post-Phase 9 — the winding branch (`tests/winding.test.ts`)
+
+**Reported from the demo: dragging a vertex through collinearity winds the spiral several
+times.** Reproduced as a three-vertex open chain, `[0,0] [100,0] [200,10]`, with the far vertex
+walked from `x = 200` to `x = −50` one unit per frame and re-solved warm each frame. At
+`x = −31` the second edge's total turning jumps from `0.87` turns to `9.36` and its arclength
+from `831` to `4085` — over a chord of `130`:
+
+| `x` | steps | max residual | turning | diagnostic |
+| --- | --- | --- | --- | --- |
+| 20 | 105 | 9.14e-11 | 0.81t | none |
+| 0 | 188 | 9.67e-11 | 0.50t | `newton-not-converging`/warning |
+| −25 | 108 | 9.09e-11 | 0.87t | none |
+| −31 | 39 | 5.85e-11 | **9.36t** | `chord-degeneracy`/warning |
+
+The wound frame is the *best*-converged of the four. That is the whole difficulty: it is a real
+solution. The G1 residual is `wrapAngle(θ_after − θ_before)`, which is blind to `2π`, so the
+solution set is a union of branches indexed by winding number and only the bending energy —
+which a local method never consults globally — separates them. Warm-starting frame to frame is
+what walks the iteration across.
+
+**It is not under-convergence.** Caps of 100, 500 and 3000 give byte-identical geometry at
+`x = −31`, and so does loosening `tolerance` from `1e-10` to `1e-8` (39 steps versus 35, same
+`9.36t`, same arclength to four decimals). The iteration is not stopping early on the way to a
+better answer; it has arrived.
+
+**It is specific to warm-started s-power.** The legacy `ClothoidSolver` caps at `0.37` turns on
+the same sweep, and a cold solve of any single frame of it caps at `0.50` — including `x = −31`
+itself, which cold-solves to `0.00t`.
+
+**Canonical chord is not a winding detector, and tightening `chordBreak` would not have
+worked.** For a unit-arclength circular arc of turning `τ`, `|C(1)| = |2·sin(τ/2)/τ|`. That is
+*non-monotone*: it returns to zero at every full loop. The `0.02–0.05` band corresponds to
+`τ ≈ 5.97–6.16` rad — 0.95 to 0.98 of one turn — while a 1.5-turn arc sits at `2/(3π) ≈ 0.21`,
+far above either threshold. The visible blow-up runs through
+`scale = chord / max(canonical, MIN_CANONICAL_CHORD)` in `SPowerClothoid._update()`, but the
+smallness of the canonical chord is a symptom of *one particular* winding, not of winding.
+
+**The bound has to be cumulative, and `2π` separates the two populations cleanly.** The spiral
+is not reached in one jump: it winds up at roughly `1.5` rad per step over 39 steps, so no
+individual step exceeds `π` and a per-step bound tight enough to catch it would be tighter than
+an ordinary Newton step. Measured against the turning at *entry to the run*, the wound frame
+moves more than 50 rad within one solve, where legitimately fitting a chain folded back on
+itself reaches about `5.5` rad from a cold start of zero. An order of magnitude apart, with the
+legitimate side being the one that needs room — hence a full circle as the readable place to
+put the line. `branchLimit: Infinity` restores the old behaviour exactly, which is what the
+test uses to keep the unguarded 9.36 turns pinned.
+
+Held on-branch, the same sweep peaks at `0.9` turns, and `branchCuts` is nonzero only on the
+frames that tried to hop. A benign four-vertex chain solves to identical arclengths bounded and
+unbounded, to `1e-9`.
+
+**The `iterations` default rises `100 → 400` for an unrelated reason found on the way.** A chain
+folded near collinearity genuinely needs 105–188 steps to reach `1e-10`. At the old cap all
+three probes above stopped at 100 with residuals of `2.8e-10`, `1.4e-7` and `5.4e-10` and
+reported `newton-not-converging` at **error** severity on geometry already correct to half a
+nanoradian. Raising the cap costs nothing on well-conditioned chains — they still finish in a
+handful of steps — and removes a class of false alarm. `x = 0` still warns at 188 steps, which
+is honest: that frame is where the chain passes through actual collinearity.
 
 ## 15. References
 

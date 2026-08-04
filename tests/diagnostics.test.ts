@@ -288,6 +288,7 @@ describe("Phase 5: what gets recorded", () => {
       ok        : false,
       history   : [0.5],
       backtracks: 0,
+      branchCuts: 0,
       starved   : false,
       refinement: Infinity,
       multiplier: 0.0,

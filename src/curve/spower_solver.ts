@@ -104,7 +104,15 @@ export interface SPowerSolverOptions {
    */
   alpha: number;
 
-  /** Outer Gauss-Newton steps. */
+  /**
+   * Outer Gauss-Newton steps.
+   *
+   * The default is well above what a well-conditioned chain needs — a handful — because the
+   * cost of falling short is a false alarm rather than a worse answer. A chain folded near
+   * collinearity converges to `1e-10` in 105–188 steps and to `5e-10` in 100; at the old cap
+   * of 100 that band reported `newton-not-converging` at `error` severity on geometry already
+   * correct to half a nanoradian. The extra steps are only ever spent where they are needed.
+   */
   iterations: number;
 
   /**
@@ -174,13 +182,40 @@ export interface SPowerSolverOptions {
    */
   breaks: number;
 
+  /**
+   * How far *one solve* may move an edge's total turning, in radians.
+   *
+   * The G1 residual is a wrapped angle gap, so it is blind to `2π`: an edge that turns by `τ`
+   * and one that turns by `τ + 2π` satisfy it identically. The solution set is a union of
+   * branches indexed by winding number, and the only thing separating them is the bending
+   * energy — which a local method never consults globally. This bound is what keeps a run on
+   * the branch it started from.
+   *
+   * Measured against the turning at entry to the run, not against the previous step. That
+   * distinction is the whole design: the wound spiral is not reached in one jump but wound up
+   * gradually, about 1.5 radians per step over 39 steps, so every individual step looks
+   * reasonable and only the total does not. A per-step bound tight enough to catch it would
+   * have to be tighter than an ordinary Newton step, and would throttle every solve.
+   *
+   * `2π` because the two things being separated are far apart and the legitimate side is the
+   * one that needs room. Fitting a chain folded back on itself genuinely reaches about `5.5`
+   * radians on an edge, from a cold start at zero; the winding it has to be told apart from
+   * moves more than fifty. Anything in between would do, and a full circle is the readable
+   * place to put it.
+   *
+   * `Infinity` disables the guard, which is the pre-existing behaviour: a drag that folds a
+   * chain back through collinearity then converges cleanly onto a nine-turn spiral, and
+   * reports success, because that spiral is a real solution of the wrapped system.
+   */
+  branchLimit: number;
+
   kkt: Partial<KKTSolveOptions>;
 }
 
 export const defaultSPowerSolverOptions: SPowerSolverOptions = {
   order       : SPOWER_ORDER,
   alpha       : 0.1,
-  iterations  : 100,
+  iterations  : 400,
   relaxation  : 1.0,
   tolerance   : 1e-10,
   dof         : sPowerDOF,
@@ -189,6 +224,7 @@ export const defaultSPowerSolverOptions: SPowerSolverOptions = {
   mode        : "artistic",
   continuation: false,
   breaks      : 3,
+  branchLimit : Math.PI * 2.0,
   kkt         : {},
 };
 
@@ -219,6 +255,15 @@ export interface SPowerSolverReport extends SolveReport {
   steps: number;
 
   /**
+   * Trial steps cut by {@link SPowerSolverOptions.branchLimit}, summed over components.
+   *
+   * Zero on ordinary geometry. Nonzero says the solve was aimed off its winding branch and
+   * held on it — which is a report about the *input*, not about the solver: it is the shape
+   * being asked for that has two answers a wrapped residual cannot tell apart.
+   */
+  branchCuts: number;
+
+  /**
    * Joints delivered below the level they were authored with — §8's breaks, counted.
    *
    * Zero in engineering mode by construction: it refuses rather than degrades. Every one of
@@ -245,6 +290,7 @@ function emptyReport(): SPowerSolverReport {
     unenforced : 0,
     maxResidual: 0.0,
     steps      : 0,
+    branchCuts : 0,
     degraded   : 0,
     attempts   : 0,
     seedSteps  : 0,
@@ -286,6 +332,15 @@ export interface ComponentRun {
 
   /** Most backtracks any one line search needed. */
   backtracks: number;
+
+  /**
+   * Trial steps cut by {@link SPowerSolverOptions.branchLimit} rather than by the merit.
+   *
+   * Nonzero means the iteration was aimed off its winding branch and was held on it. Worth
+   * surfacing separately from {@link backtracks}: an ordinary backtrack says the step was too
+   * long, this one says it was pointed somewhere the wrapped residual cannot see.
+   */
+  branchCuts: number;
 
   /** True if a line search ran out of room without improving the merit. */
   starved: boolean;
@@ -1602,6 +1657,40 @@ export class ComponentSystem {
     return worst;
   }
 
+  /**
+   * Every chain's per-edge turning, flattened — the branch guard's baseline.
+   *
+   * Read straight off {@link ChainSystem.turning}, so {@link measure} has to have run since
+   * the DOF last moved. Reusing `into` keeps the guard off the allocation path.
+   */
+  turnings(into?: Float64Array) {
+    const out = into ?? new Float64Array(this.systems.reduce((n, s) => n + s.turning.length, 0));
+
+    let k = 0;
+
+    for (const s of this.systems) {
+      for (const turn of s.turning) {
+        out[k++] = turn;
+      }
+    }
+
+    return out;
+  }
+
+  /** Largest `|Δ turning|` against `base`, over every edge in the component. */
+  turningDrift(base: Float64Array) {
+    let worst = 0.0;
+    let k = 0;
+
+    for (const s of this.systems) {
+      for (const turn of s.turning) {
+        worst = Math.max(worst, Math.abs(turn - base[k++]));
+      }
+    }
+
+    return worst;
+  }
+
   /** `½zᵀHz + μ·Σ|c_i|` over the whole component — §5's `ℓ1` merit, summed. */
   merit(mu: number) {
     let energy = 0.0;
@@ -1999,11 +2088,16 @@ export class ComponentSystem {
     let starved = false;
     let refinement = 0.0;
     let multiplier = 0.0;
+    let branchCuts = 0;
 
     this.gather();
     this.write();
 
     let residual = this.measure();
+
+    // After the first `measure`, which is what fills `turning` in the first place.
+    const branch = opts.branchLimit;
+    const baseTurning = Number.isFinite(branch) ? this.turnings() : undefined;
 
     for (let iter = 0; ; iter++) {
       if (iter >= opts.iterations || residual < opts.tolerance || this.multiplierRows.length === 0) {
@@ -2041,7 +2135,11 @@ export class ComponentSystem {
         this.write();
         this.measure();
 
-        if (this.merit(mu) < start) {
+        // Cumulative since the run began, not since the last step: see `branchLimit`. Cut
+        // like a merit failure, so the same backtracking applies.
+        const hopped = baseTurning !== undefined && this.turningDrift(baseTurning) > branch;
+
+        if (!hopped && this.merit(mu) < start) {
           break;
         }
 
@@ -2049,6 +2147,10 @@ export class ComponentSystem {
         if (t < MIN_RELAXATION) {
           starved = true;
           break;
+        }
+
+        if (hopped) {
+          branchCuts++;
         }
 
         t *= SHRINK;
@@ -2097,6 +2199,7 @@ export class ComponentSystem {
       ok: factored && Number.isFinite(residual),
       history,
       backtracks,
+      branchCuts,
       starved,
       refinement,
       multiplier,
@@ -2248,6 +2351,7 @@ export class SPowerSolver implements CurveSolver {
     }
 
     report.steps += run.steps;
+    report.branchCuts += run.branchCuts;
     report.maxResidual = Math.max(report.maxResidual, run.residual);
     report.ok &&= run.ok && !refused;
 
