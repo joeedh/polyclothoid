@@ -1,6 +1,10 @@
+/** Which curve type the mesh solves with. See {@link Mesh.switchSplineType}. */
+export type SplineType = "spower" | "clothoid" | "bezier" | "bspline";
+
 /** Everything the control panel can change. Persisted to localStorage between reloads. */
 export interface Settings {
   mode: "edit" | "paint";
+  spline: SplineType;
 
   radius: number;
   spacing: number;
@@ -17,7 +21,8 @@ export interface Settings {
 }
 
 export const defaultSettings: Settings = {
-  mode: "edit",
+  mode  : "edit",
+  spline: "spower",
 
   radius : 25,
   spacing: 0.1,
@@ -135,6 +140,7 @@ export interface PanelActions {
   onChange: () => void;
   clearDabs: () => void;
   resetMesh: () => void;
+  switchSpline: () => void;
 }
 
 /** Returns a `sync` hook so code that changes settings outside the panel can refresh it. */
@@ -173,6 +179,33 @@ export function buildPanel(root: HTMLElement, settings: Settings, actions: Panel
   button(dabs, "Clear dabs", actions.clearDabs);
 
   const mesh = group(root, "Mesh");
+  const splineSelect = document.createElement("select");
+
+  const splines: [SplineType, string][] = [
+    ["spower", "Clothoid (s-power)"],
+    ["clothoid", "Clothoid (legacy)"],
+    ["bezier", "Cubic bezier"],
+    ["bspline", "B-spline"],
+  ];
+
+  for (const [type, label] of splines) {
+    const option = document.createElement("option");
+
+    option.value = type;
+    option.textContent = label;
+    option.selected = settings.spline === type;
+
+    splineSelect.append(option);
+  }
+
+  splineSelect.addEventListener("change", () => {
+    settings.spline = splineSelect.value as SplineType;
+    actions.switchSpline();
+    onChange();
+  });
+
+  row(mesh, "Spline").append(splineSelect);
+
   checkbox(mesh, settings, "drawMesh", "Draw mesh", onChange);
   checkbox(mesh, settings, "drawExtra", "Curve debug overlay", onChange);
   checkbox(mesh, settings, "drawNormals", "Curvature combs", onChange);

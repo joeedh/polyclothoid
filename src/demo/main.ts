@@ -1,7 +1,30 @@
-import { BezierSolver, CubicBezier, Mesh, MeshFlags, Stroker, Vector2, type Vertex } from "../index.js";
+import {
+  BSpline,
+  BSplineSolver,
+  BezierSolver,
+  Clothoid,
+  ClothoidSolver,
+  CubicBezier,
+  Mesh,
+  MeshFlags,
+  SPowerClothoid,
+  SPowerSolver,
+  Stroker,
+  Vector2,
+  type CurveConstructor,
+  type CurveSolverConstructor,
+  type Vertex,
+} from "../index.js";
 import { DabKind, DabList } from "./dabs.js";
 import { drawScene } from "./render.js";
-import { buildPanel, loadSettings, saveSettings } from "./ui.js";
+import { buildPanel, loadSettings, saveSettings, type SplineType } from "./ui.js";
+
+const SPLINES: Record<SplineType, [CurveConstructor, CurveSolverConstructor]> = {
+  spower  : [SPowerClothoid, SPowerSolver],
+  clothoid: [Clothoid, ClothoidSolver],
+  bezier  : [CubicBezier, BezierSolver],
+  bspline : [BSpline, BSplineSolver],
+};
 
 /** Pick radius in CSS pixels. */
 const PICK_DIST = 20;
@@ -16,6 +39,8 @@ function makeStartMesh() {
   const m = new Mesh();
   const s = 120;
   const d = 260;
+
+  m.switchSplineType(...SPLINES[settings.spline]);
 
   const v1 = m.makeVertex([s, s, 0]);
   const v2 = m.makeVertex([s, s + d, 0]);
@@ -80,6 +105,11 @@ const panelHooks = buildPanel(panel, settings, {
   },
   resetMesh() {
     mesh = makeStartMesh();
+    redraw();
+  },
+  switchSpline() {
+    mesh.switchSplineType(...SPLINES[settings.spline]);
+    mesh.regenSolve();
     redraw();
   },
 });
