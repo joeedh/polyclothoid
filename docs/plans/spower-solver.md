@@ -1841,9 +1841,12 @@ unconverged state the line search stopped on. Dragging four vertices instead of 
 | `fold4`, budget per joint | 0 | 0 | 0 | 0.91t |
 | `spike`, per joint, guard only | 0 | 2 | 2 | 4.12t |
 | `spike`, per joint, guard raising a fault | 0 | 0 | 0 | 0.91t |
+| `fold5`, per joint, guard only | 0 | 2 | 2 | 1.21t |
+| `fold5`, per joint, guard raising a fault | 0 | 0 | 0 | 0.87t |
 
 `fold4` is `[0,0] [100,0] [200,5] [300,0]` with the last vertex dragged 400 units left over 251
-warm-started frames; `spike` is the same drag over `[0,0] [100,1] [200,0] [300,1]`. Three
+warm-started frames; `spike` is the same drag over `[0,0] [100,1] [200,0] [300,1]`, and `fold5`
+over `[0,0] [80,10] [160,-5] [240,8] [320,0]` — two interior joints, two, and three. Three
 separate defects, and the table separates them:
 
 **`breaks` was a per-joint number spent per chain.** `3` walks one `p = 1` joint the whole way
@@ -1867,8 +1870,9 @@ and `ok: true` with all three segments at zero length.
 by the very step enforcing it.
 
 **`branch-obstruction`, which is the structural answer rather than a bound.** With the first
-three fixed, `spike` still wound twice out of 251 at any budget: the guard cut the steps, the
-run failed to land, and no fault named a joint, so §8's ladder never engaged. The guard now
+three fixed, `spike` and `fold5` still wound twice out of 251 each at any budget: the guard cut
+the steps, the run failed to land, and no fault named a joint, so §8's ladder never engaged.
+Raising the budget does not help, because the ladder is not being asked. The guard now
 localizes. `ChainSystem` carries its own `baseTurning` and counts the trials cut while *it*
 held the component's maximum drift, and `faults()` raises `branch-obstruction` against
 `strainedEnd` of the drifting edge whenever the guard cut steps and the run still did not land
@@ -1882,11 +1886,13 @@ On the three-vertex `fold3` the fault never fires — the guarded solve converge
 there is nothing to answer — and the sweep is unchanged at `0.89t`. The ladder engages where
 the guard is insufficient and stays out of the way where it is not.
 
-**What it costs.** `fold4` runs 1033 ms/frame guarded against 438 unguarded, and `spike` 907
-against 366; each ladder attempt rebuilds the continuation rungs from `p = 0`, and these
-frames reach seven attempts. The unguarded column is not an option — it winds five frames out
-of 251 on `spike` — but a 2.4× on pathological frames is worth revisiting. Benign geometry is
-untouched: the guard costs nothing measurable on a chain that never approaches a branch.
+**What it costs.** `fold4` runs 1033 ms/frame guarded against 438 unguarded, `spike` 907 against
+366, and `fold5` 2110 against 964; each ladder attempt rebuilds the continuation rungs from
+`p = 0`, and these frames reach seven. The unguarded column is not an option — it winds five
+frames out of 251 on `spike` and four on `fold5` — but a consistent 2.2–2.4× on pathological
+frames is worth revisiting, as is the second-a-frame absolute number on a five-vertex chain.
+Benign geometry is untouched: the guard costs nothing measurable on a chain that never
+approaches a branch.
 
 **Coverage is split deliberately.** The suite pins the mechanism on a static six-vertex zigzag,
 where the fault is raised, localized to joint 2, and answered with a break, and where `breaks: 0`
