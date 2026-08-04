@@ -175,10 +175,24 @@ export interface SPowerSolverOptions {
   continuation: boolean;
 
   /**
-   * How many levels one chain may lose in a single solve, across all its joints.
+   * How many levels *each* interior joint may lose in a single solve.
    *
-   * Three walks a `p = 1` joint the whole way from `G3` to a corner, so the default cannot
-   * run out of room on a chain; it is a bound on thrash, not on depth.
+   * The budget the ladder actually spends is this times the number of interior joints in the
+   * component, because a level is lost from one joint at a time and a chain with more joints
+   * has correspondingly more to give. Three walks a `p = 1` joint the whole way from `G3` to
+   * a corner, so at the default no joint can run out of room.
+   *
+   * That per-joint reading is the fix to a real bug and not a restatement. The budget used to
+   * be spent across the whole chain, which is the same number only when there is one joint to
+   * spend it on: a four-vertex fold dragged through collinearity has two, needs six levels
+   * between them, and given three exhausted the ladder mid-descent and returned whichever
+   * unconverged rung it stopped on. §14 measures the same sweep going from 101 non-finite
+   * frames out of 251 to none, on the budget alone.
+   *
+   * What the ladder descends *to* is what makes this safe to leave generous: every joint a
+   * corner, each edge fit to its own chord with no tangent coupling to anything. That
+   * configuration always exists, and §13's winding branches cannot arise in it because there
+   * is no wrapped angle gap left to have two answers. `0` disables breaking outright.
    */
   breaks: number;
 
@@ -203,9 +217,18 @@ export interface SPowerSolverOptions {
    * moves more than fifty. Anything in between would do, and a full circle is the readable
    * place to put it.
    *
+   * Holding the run on its branch is not always enough, and the case where it is not is the
+   * point of `branch-obstruction`: nothing guarantees a configuration *has* a winding-free
+   * solution at the levels it was authored with. When the guard has cut steps and the run
+   * still does not land, the chain that was at the bound raises that fault against the joint
+   * the drifting edge is strained at, and §8's ladder lowers it — down to a corner if that is
+   * what it takes, which is a configuration that always exists. The guard is then the detector
+   * and the ladder is the answer, rather than the guard being asked to be both.
+   *
    * `Infinity` disables the guard, which is the pre-existing behaviour: a drag that folds a
    * chain back through collinearity then converges cleanly onto a nine-turn spiral, and
-   * reports success, because that spiral is a real solution of the wrapped system.
+   * reports success, because that spiral is a real solution of the wrapped system. It also
+   * disables the fault above, there being nothing left to notice the obstruction.
    */
   branchLimit: number;
 
@@ -381,8 +404,18 @@ export interface Fault {
  * {@link ChainSystem.faults} emits in this order already; the constant exists so the same
  * order can be re-imposed after faults from several chains of a component are merged, where
  * concatenation would otherwise let one chain's symptom outrank another chain's cause.
+ *
+ * `branch-obstruction` sits second because it is a cause of both the rows below it: a segment
+ * driven onto another winding branch is what collapses the chord and what the iteration then
+ * fails to converge about. It sits below rank deficiency because a singular constraint set is
+ * the deeper reading — the tangents are not merely unreachable, they are not independent.
  */
-const FAULT_ORDER: DiagnosticCondition[] = ["g1-rank-deficiency", "chord-degeneracy", "newton-not-converging"];
+const FAULT_ORDER: DiagnosticCondition[] = [
+  "g1-rank-deficiency",
+  "branch-obstruction",
+  "chord-degeneracy",
+  "newton-not-converging",
+];
 
 /** `Rᵥ` for every vertex, from chord lengths only — §3, and §5's note that `Rᵥ` is shared. */
 export function referenceLengths(mesh: SolvableMesh) {
@@ -483,6 +516,25 @@ export class ChainSystem {
   turning: Float64Array;
   angle: Float64Array;
   arclength: Float64Array;
+
+  /**
+   * {@link turning} as of the start of the current run, or undefined with the guard off.
+   *
+   * The branch guard's baseline. Only ever written by {@link ComponentSystem.markBranch}, so a
+   * chain that has not been run since it was built does not have one.
+   */
+  baseTurning?: Float64Array;
+
+  /**
+   * Line-search trials cut because *this* chain was the one at the branch bound, and where.
+   *
+   * The guard measures the component, but only one chain holds the maximum when a trial is
+   * refused, and it is that chain's joint that has to give. Written by {@link
+   * ComponentSystem.run} at the moment of the cut rather than read back afterwards, since by
+   * then the rejected trial has been rolled off and the drift that caused it is gone.
+   */
+  branchCuts = 0;
+  branchEdge = -1;
 
   /** `∂KTH_e/∂a` and `∂L_e/∂a` per edge — §5, and empty with the Jacobian frozen. */
   jacobians: TransformJacobian[] = [];
@@ -1017,15 +1069,18 @@ export class ChainSystem {
    * this attempt handed back rather than merely stop being unhealthy. That is the whole of the
    * hysteresis, and it is per-joint rather than per-chain because the caps are.
    *
-   * Ordering is rank, then chord, then divergence — cause before symptom. A rank-deficient
-   * joint makes the iteration diverge, and lowering the joint the *divergence* pointed at
-   * would be treating the second reading.
+   * Ordering is rank, branch, chord, then divergence — cause before symptom, as {@link
+   * FAULT_ORDER} lays out. A rank-deficient joint makes the iteration diverge, and lowering
+   * the joint the *divergence* pointed at would be treating the second reading.
    */
   faults(run: ComponentRun, broken?: Map<SolvableVertex, number>): Fault[] {
     const limits = stabilityThresholds;
     const { verts } = this.chain;
     const found: Fault[] = [];
     const healing = (v: SolvableVertex) => broken?.has(v) ?? false;
+
+    const rate = geometricRate(run.history);
+    const stalled = run.steps >= this.options.iterations && !(run.residual < this.options.tolerance);
 
     for (let i = 1; i < this.frames.length; i++) {
       if (this.lambdaAt[i] < 0) {
@@ -1037,6 +1092,25 @@ export class ChainSystem {
 
       if (!(measured > threshold)) {
         found.push({ condition: "g1-rank-deficiency", at: i, vertex: verts[i], measured, threshold });
+      }
+    }
+
+    // The guard held the iteration on its branch and it did not land anyway: the tangents this
+    // joint's continuity asks for are not reachable without winding. Outcome, not history —
+    // a search that starved once and then converged has been answered, not obstructed.
+    const landed = run.ok && run.residual < this.options.tolerance;
+
+    if (this.branchCuts > 0 && !landed) {
+      const at = this.strainedEnd(this.branchEdge);
+
+      if (at >= 0) {
+        found.push({
+          condition: "branch-obstruction",
+          at,
+          vertex   : verts[at],
+          measured : this.branchCuts,
+          threshold: 0,
+        });
       }
     }
 
@@ -1058,8 +1132,6 @@ export class ChainSystem {
       }
     }
 
-    const rate = geometricRate(run.history);
-    const stalled = run.steps >= this.options.iterations && !(run.residual < this.options.tolerance);
     const at = this.worstJoint();
 
     if (at >= 0) {
@@ -1096,6 +1168,31 @@ export class ChainSystem {
     }
 
     return Math.abs(this.residuals[a]) >= Math.abs(this.residuals[b]) ? a : b;
+  }
+
+  /**
+   * How far this chain's turning has moved from {@link baseTurning}, and on which edge.
+   *
+   * `edge` is `-1` with the guard off, which is the only case where there is no baseline to
+   * measure against. Zero drift on a real baseline still names an edge, since the caller that
+   * cares has already established from the run that a bound was being fought.
+   */
+  turningDrift() {
+    const base = this.baseTurning;
+
+    let drift = 0.0;
+    let edge = -1;
+
+    for (let i = 0; base !== undefined && i < this.turning.length; i++) {
+      const moved = Math.abs(this.turning[i] - base[i]);
+
+      if (edge < 0 || moved > drift) {
+        drift = moved;
+        edge = i;
+      }
+    }
+
+    return { drift, edge };
   }
 
   /** The enforced joint with the largest angle gap — where a non-converging chain is stuck. */
@@ -1658,37 +1755,44 @@ export class ComponentSystem {
   }
 
   /**
-   * Every chain's per-edge turning, flattened — the branch guard's baseline.
+   * Snapshot every chain's turning as the branch guard's baseline for this run.
    *
-   * Read straight off {@link ChainSystem.turning}, so {@link measure} has to have run since
-   * the DOF last moved. Reusing `into` keeps the guard off the allocation path.
+   * Kept on the chains rather than flattened here so that {@link ChainSystem.faults} can name
+   * the *edge* a hop was aimed at, which is what lets an obstruction be localized to a joint
+   * and answered structurally. Read straight off {@link ChainSystem.turning}, so `measure` has
+   * to have run since the DOF last moved.
    */
-  turnings(into?: Float64Array) {
-    const out = into ?? new Float64Array(this.systems.reduce((n, s) => n + s.turning.length, 0));
-
-    let k = 0;
-
+  markBranch() {
     for (const s of this.systems) {
-      for (const turn of s.turning) {
-        out[k++] = turn;
-      }
+      s.baseTurning = Float64Array.from(s.turning);
+      s.branchCuts = 0;
+      s.branchEdge = -1;
     }
-
-    return out;
   }
 
-  /** Largest `|Δ turning|` against `base`, over every edge in the component. */
-  turningDrift(base: Float64Array) {
-    let worst = 0.0;
-    let k = 0;
+  /**
+   * The largest `|Δ turning|` against the baseline anywhere in the component, and whose it is.
+   *
+   * `system` is undefined only when the component has no chains, which is not a case the run
+   * loop reaches. The maximum is what the guard compares, and the chain holding it is what
+   * makes the resulting fault localizable.
+   */
+  turningDrift() {
+    let drift = 0.0;
+    let edge = -1;
+    let system: ChainSystem | undefined;
 
     for (const s of this.systems) {
-      for (const turn of s.turning) {
-        worst = Math.max(worst, Math.abs(turn - base[k++]));
+      const local = s.turningDrift();
+
+      if (system === undefined || local.drift > drift) {
+        drift = local.drift;
+        edge = local.edge;
+        system = s;
       }
     }
 
-    return worst;
+    return { drift, edge, system };
   }
 
   /** `½zᵀHz + μ·Σ|c_i|` over the whole component — §5's `ℓ1` merit, summed. */
@@ -2017,6 +2121,26 @@ export class ComponentSystem {
     return { residual, ok: true };
   }
 
+  /**
+   * Whether the geometry the DOF actually produced is finite, edge by edge.
+   *
+   * A finite residual does not imply this. The angle gap is read off `curves[i].th`, and a
+   * segment that has collapsed can report a gap of exactly zero while its arclength has gone
+   * to `NaN` — a solve that satisfies every constraint it can see and has produced nothing.
+   * Checked against the geometry rather than the DOF because that is what a caller receives.
+   */
+  finite() {
+    for (const s of this.systems) {
+      for (let i = 0; i < s.arclength.length; i++) {
+        if (!Number.isFinite(s.arclength[i]) || !Number.isFinite(s.turning[i])) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
   /** `−(Kz)` with the multiplier rows replaced by `−c` — the Newton right-hand side. */
   gradient(rhs: Float64Array) {
     this.applyGlobal(this.z, rhs);
@@ -2097,7 +2221,11 @@ export class ComponentSystem {
 
     // After the first `measure`, which is what fills `turning` in the first place.
     const branch = opts.branchLimit;
-    const baseTurning = Number.isFinite(branch) ? this.turnings() : undefined;
+    const bounded = Number.isFinite(branch);
+
+    if (bounded) {
+      this.markBranch();
+    }
 
     for (let iter = 0; ; iter++) {
       if (iter >= opts.iterations || residual < opts.tolerance || this.multiplierRows.length === 0) {
@@ -2137,7 +2265,8 @@ export class ComponentSystem {
 
         // Cumulative since the run began, not since the last step: see `branchLimit`. Cut
         // like a merit failure, so the same backtracking applies.
-        const hopped = baseTurning !== undefined && this.turningDrift(baseTurning) > branch;
+        const worst = bounded ? this.turningDrift() : undefined;
+        const hopped = worst !== undefined && worst.drift > branch;
 
         if (!hopped && this.merit(mu) < start) {
           break;
@@ -2146,11 +2275,20 @@ export class ComponentSystem {
         // Out of room rather than out of patience: the direction was not a descent one.
         if (t < MIN_RELAXATION) {
           starved = true;
+
+          // Put the last *rejected* trial back. Leaving it applied is how a bound the line
+          // search is enforcing gets defeated by the very step it refused.
+          this.z.set(base);
+          this.take(this.z);
+          this.write();
           break;
         }
 
-        if (hopped) {
+        if (hopped && worst?.system) {
           branchCuts++;
+
+          worst.system.branchCuts++;
+          worst.system.branchEdge = worst.edge;
         }
 
         t *= SHRINK;
@@ -2196,7 +2334,7 @@ export class ComponentSystem {
       steps,
       residual,
       factored,
-      ok: factored && Number.isFinite(residual),
+      ok: factored && Number.isFinite(residual) && this.finite(),
       history,
       backtracks,
       branchCuts,
@@ -2303,7 +2441,12 @@ export class SPowerSolver implements CurveSolver {
     let { systems, run } = this.ladder(component, refs, caps, report);
     let refused = false;
 
-    for (let attempt = 0; attempt < opts.breaks; attempt++) {
+    // Per interior joint, not per chain — see `breaks`. Each pass spends one level from one
+    // joint, so a component with more joints to lower needs proportionally more passes.
+    const joints = component.chains.reduce((n, c) => n + Math.max(0, c.edges.length - 1), 0);
+    const budget = opts.breaks * joints;
+
+    for (let attempt = 0; attempt < budget; attempt++) {
       const faults = this.rank(component, systems, run);
 
       if (faults.length === 0) {

@@ -29,6 +29,8 @@ import {
   pairsToTaylor,
   sPowerLength,
 } from "../src/curve/index.js";
+import { ChainSystem, defaultSPowerSolverOptions, referenceLengths } from "../src/curve/spower_solver.js";
+import { chains } from "../src/curve/topology.js";
 import { Mesh, type Edge } from "../src/mesh/index.js";
 
 const ZIGZAG = [
@@ -243,14 +245,27 @@ describe("Phase 7: the ladder", () => {
   });
 
   it("will not seed from a rung §8 says cannot be trusted", () => {
-    const cold = solve(TIGHT, { order: 1 }).report;
-    const warm = solve(TIGHT, { order: 1, continuation: true }).report;
+    const { mesh } = polyline(TIGHT);
+    const refs = referenceLengths(mesh);
+    const [chain] = [...chains(mesh)];
 
-    // The `p = 0` rung on this fixture trips a stability criterion, so the top rung starts
-    // cold and the two runs are the same run — bar the rung that was paid for and discarded.
-    assert.ok(warm.seedSteps > 0);
-    assert.equal(warm.steps, cold.steps);
-    assert.equal(warm.maxResidual, cold.maxResidual);
-    assert.equal(warm.degraded, cold.degraded);
+    // `ladder`'s seeding predicate, evaluated on the rung it would seed *from*, at the caps it
+    // has on the first attempt — none. Asserted here rather than inferred from two whole-solve
+    // reports agreeing, which they can do for reasons that have nothing to do with seeding.
+    const rung = new ChainSystem(chain, refs, { ...defaultSPowerSolverOptions, order: 0 });
+    const run = rung.run();
+
+    assert.equal(run.ok && run.residual < defaultSPowerSolverOptions.tolerance, false);
+    assert.ok(rung.faults(run).length > 0, "the fixture stopped tripping any criterion");
+
+    // What a discarded rung costs is steps, and only steps. Both solves reach the same curve
+    // and break the same joints; the warm one has paid `seedSteps` for a rung it threw away.
+    const cold = solve(TIGHT, { order: 1 });
+    const warm = solve(TIGHT, { order: 1, continuation: true });
+
+    assert.ok(cold.report.ok && warm.report.ok);
+    assert.ok(warm.report.seedSteps > 0, "the ladder ran no lower rungs");
+    assert.equal(warm.report.degraded, cold.report.degraded);
+    assert.ok(farthest(trace(cold.edges), trace(warm.edges)) < 1e-6);
   });
 });

@@ -37,9 +37,15 @@ import { type CurveEdge, type CurveVertex } from "./curve.js";
  * an already-factored matrix, and what it returns is one number for the whole chain — which is
  * not a *located* record, so it fails the shape this module exists to enforce. The per-element
  * condition numbers that *are* free say nothing about the assembled `H`.
+ *
+ * One is not from §8's table at all: `branch-obstruction`, which reports that the tangent angles
+ * a joint's continuity demands cannot be met without the segment winding onto another branch of
+ * the wrapped angle gap. §8 has no row for it because §8 assumes a solution exists at the
+ * authored levels, and the whole content of this condition is that one does not.
  */
 export type DiagnosticCondition =
   | "chord-degeneracy"
+  | "branch-obstruction"
   | "newton-not-converging"
   | "line-search-failing"
   | "refinement-not-converging"

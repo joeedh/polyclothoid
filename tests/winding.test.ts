@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { Mesh, SPowerClothoid, SPowerSolver, type Vertex } from "../src/index.js";
+import { defaultSPowerSolverOptions } from "../src/curve/spower_solver.js";
 
 /**
  * Total turning of an edge, differenced out of `derivative()`.
@@ -144,6 +145,77 @@ describe("the winding branch", () => {
     for (let i = 0; i < bounded.length; i++) {
       assert.ok(Math.abs(bounded[i] - unbounded[i]) < 1e-9, `edge ${i}: ${bounded[i]} vs ${unbounded[i]}`);
     }
+  });
+});
+
+/**
+ * A zigzag tight enough that no winding-free fit exists at the level it is authored with.
+ *
+ * §14's Phase 6 table already has this one degrading rather than converging cleanly. What it
+ * adds here is that the degradation is the *branch's* doing: held on-branch it cannot land at
+ * all, and the joint it gives up is the one the drifting edge was strained at.
+ */
+const TIGHT = [
+  [0, 0],
+  [1, 1.2],
+  [2, 0],
+  [3, 1.2],
+  [4, 0],
+  [5, 1.2],
+];
+
+function zigzag(options: Partial<ConstructorParameters<typeof SPowerSolver>[1]>) {
+  const mesh = new Mesh();
+
+  mesh.CurveCls = SPowerClothoid;
+  mesh.SolverCls = SPowerSolver;
+
+  const verts = TIGHT.map((p) => mesh.makeVertex([p[0], p[1], 0]));
+  const edges = [];
+
+  for (let i = 0; i + 1 < verts.length; i++) {
+    edges.push(mesh.makeEdge(verts[i], verts[i + 1]));
+  }
+
+  return { edges, report: new SPowerSolver(mesh, { order: 1, ...options }).solve() };
+}
+
+/** Both fits are slow enough to be worth sharing, as with the drag above. */
+const repaired = zigzag({});
+const unrepaired = zigzag({ breaks: 0 });
+
+describe("branch obstruction", () => {
+  test("is raised against a joint, and the joint is lowered for it", () => {
+    const found = repaired.report.diagnostics.filter((d) => d.condition === "branch-obstruction");
+
+    assert.equal(found.length, 1);
+    assert.equal(found[0].action, "degraded");
+
+    // The whole reason the guard's bookkeeping is per chain rather than per component: a
+    // record that named the chain would have nothing for §8's ladder to act on.
+    assert.ok(found[0].at > 0, `an obstruction must name an interior joint, got ${found[0].at}`);
+  });
+
+  test("and what comes back is a curve, which without the ladder it is not", () => {
+    assert.ok(repaired.report.ok);
+
+    for (const e of repaired.edges) {
+      assert.ok(Number.isFinite(e.curve.length), `edge length ${e.curve.length}`);
+    }
+
+    // Breaking is the only thing between these two. Same points, same guard, no levels to
+    // spend: the coefficients run away and the solve says so rather than handing back `NaN`.
+    assert.equal(unrepaired.report.ok, false);
+    assert.ok(!Number.isFinite(unrepaired.report.maxResidual));
+  });
+
+  test("the budget it spends is per joint and not per chain", () => {
+    // Four interior joints, and this fixture needs levels from two of them. Spent per chain,
+    // the ladder would have stopped after `breaks` passes holding an unconverged rung.
+    assert.ok(
+      repaired.report.attempts > defaultSPowerSolverOptions.breaks,
+      `${repaired.report.attempts} attempts against a per-chain budget of ${defaultSPowerSolverOptions.breaks}`
+    );
   });
 });
 

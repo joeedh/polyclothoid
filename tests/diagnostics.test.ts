@@ -253,16 +253,19 @@ describe("Phase 5: what gets recorded", () => {
   });
 
   /*
-    The reason the canonical chord is checked from both ends. Here the coefficients run away,
-    every segment collapses, and the angle gap goes to zero because two points meet
-    tangentially for free — a solve that reports success and has produced nothing.
+    The reason the canonical chord is checked from both ends. Here the coefficients run away
+    and every segment collapses, with the ladder switched off so the collapse is not repaired
+    before it can be measured.
   */
-  it("catches a runaway from the other side, where the residual claims success", () => {
+  it("catches a runaway from the other side, where the residual cannot", () => {
     const { mesh, edges } = polyline(HAIRPIN);
 
     const report = new SPowerSolver(mesh, { breaks: 0 }).solve();
 
-    assert.ok(report.maxResidual < 1e-12, `fixture stopped claiming success: ${report.maxResidual}`);
+    // The residual is no help in either direction. Two collapsed points meet tangentially for
+    // free, so this fixture used to report a gap of exactly zero and `ok: true`; now that the
+    // geometry is checked it reports `NaN`. Neither number says "degenerate" on its own.
+    assert.equal(report.ok, false, "a solve that produced no geometry must not report success");
 
     const chord = report.diagnostics.filter((d) => d.condition === "chord-degeneracy");
 
@@ -270,7 +273,10 @@ describe("Phase 5: what gets recorded", () => {
 
     for (const d of chord) {
       assert.equal(d.severity, "error");
-      assert.ok(d.measured > 1.0, `canonical chord ${d.measured} is not out of range`);
+
+      // Negated rather than `> 1.0`, as in the source: out of range is out of range whether
+      // the reading overshot or stopped being a number at all.
+      assert.ok(!(d.measured <= 1.0), `canonical chord ${d.measured} is not out of range`);
     }
   });
 

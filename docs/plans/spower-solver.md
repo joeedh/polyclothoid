@@ -578,6 +578,20 @@ can shrink while it diverges. Use monotone decrease of the merit function over a
 plus a geometric fit of the residual over at least three iterations, plus a line-search
 failure count. Three signals, none of which is a single-step test.
 
+**4. Branch obstruction.** *Added after Phase 9, not in the original three.* The G1 residual is
+a wrapped angle gap, so the solution set is a union of branches indexed by winding number, and
+`branchLimit` holds a run on the branch it entered on (§13, §14). What that bound cannot supply
+is a solution: nothing guarantees a configuration *has* a winding-free fit at the levels it was
+authored with, and held on-branch such a configuration does not converge at all. So the guard
+raises a fault rather than only cutting steps — the chain that held the maximum drift when a
+trial was refused names the joint the drifting edge is strained at, and only when the run then
+failed to land, since a search that starved once and converged anyway has been answered.
+
+This stays inside the policy above. The criterion is "the iteration cannot reach an answer from
+here," which is the same kind of statement as criteria 1–3 and not a judgement about whether a
+corner was wanted. It is on the list because the alternative is a bound with no fallback, which
+in measurement returned whichever unconverged state the line search stopped on.
+
 Note what is *not* on this list: `|λ_v|`. A large multiplier means the joint is expensive to
 hold, which is a judgement about whether a corner was wanted there — modelling, not
 stability. Under this policy the solver may not act on it.
@@ -638,6 +652,7 @@ A diagnostic is a located, typed record, not a boolean: **where** (vertex, edge,
 | Newton not converging | merit-function history + geometric fit | §8 criterion 3 |
 | line search failing | backtrack count per step | step direction is not a descent direction |
 | G1 rank deficiency | pivoted QR of the local `J` block | near-parallel tangent rows at a junction |
+| branch obstruction | trials cut by `branchLimit`, on a run that did not land | §8 criterion 4 |
 | ill-conditioned `H` | condition estimate of the `(1,1)` block | usually a degenerate chord length |
 | refinement not converging | residual after iterative refinement | the `δ` regularization is too large for this system |
 | level lowered | the solve record | artistic mode only; engineering mode refuses instead |
@@ -1118,6 +1133,14 @@ it worth recording — the only visible symptom was the iteration count.
   weaker than the fix described here — it preserves whatever branch the seed is on rather than
   naming the one that is wanted, so it cannot *author* a turning number, and a cold solve of a
   shape whose intended winding is not the nearest one still has no way to ask for it.
+
+  *Answered structurally after that,* for the half of the problem that is the solver's. A bound
+  is not enough on its own, because there is no guarantee a configuration has a winding-free fit
+  at the levels it was authored with: held on-branch it then fails to converge at all. The guard
+  now raises `branch-obstruction` against the joint the drifting edge is strained at, and §8's
+  ladder lowers it — to a corner if that is what it takes, which is a configuration that always
+  exists and has no wrapped angle gap left to have two answers (§14). What remains open is the
+  authoring half: naming a wanted turning number rather than keeping the one the seed had.
 - **Endpoint interpolation by similarity transform is assumed.** The alternative is dropping
   it and constraining position explicitly: two nonlinear rows per segment instead of two
   nonlinear scalars. Roughly a wash in count, worse in conditioning (world-unit position
@@ -1803,6 +1826,73 @@ reported `newton-not-converging` at **error** severity on geometry already corre
 nanoradian. Raising the cap costs nothing on well-conditioned chains — they still finish in a
 handful of steps — and removes a class of false alarm. `x = 0` still warns at 188 steps, which
 is honest: that frame is where the chain passes through actual collinearity.
+
+### Post-Phase 9 — when no winding-free fit exists (`tests/winding.test.ts`)
+
+**The guard above is a band-aid, and the three-vertex chain it was built against is the only
+case it is sufficient for.** Nothing guarantees a point configuration *has* a winding-free
+solution at the levels it was authored with. Held on-branch, such a configuration does not
+converge to something worse — it does not converge at all, and what came back was whichever
+unconverged state the line search stopped on. Dragging four vertices instead of three:
+
+| sweep | non-finite frames | wound frames | claimed success anyway | worst turning |
+| --- | --- | --- | --- | --- |
+| `fold4`, budget spent per chain | 101 / 251 | 37 | 56 | 49.6t |
+| `fold4`, budget per joint | 0 | 0 | 0 | 0.91t |
+| `spike`, per joint, guard only | 0 | 2 | 2 | 4.12t |
+| `spike`, per joint, guard raising a fault | 0 | 0 | 0 | 0.91t |
+
+`fold4` is `[0,0] [100,0] [200,5] [300,0]` with the last vertex dragged 400 units left over 251
+warm-started frames; `spike` is the same drag over `[0,0] [100,1] [200,0] [300,1]`. Three
+separate defects, and the table separates them:
+
+**`breaks` was a per-joint number spent per chain.** `3` walks one `p = 1` joint the whole way
+from `G3` to a corner, which is the reasoning the default was chosen by — but the loop in
+`solveComponent` spent it across the whole component, and one level comes off one joint per
+pass. That is the same number only for a three-vertex chain. `fold4` has two interior joints
+and needs six; given three it exhausted the ladder mid-descent. The budget is now
+`breaks × interior joints`, which is row two, on the budget alone.
+
+**`run.ok` did not look at the geometry.** It was `factored && Number.isFinite(residual)`, and
+the angle gap is read off `curves[i].th` — a segment that has collapsed reports a gap of
+exactly zero while its arclength goes to `NaN`. Every constraint the solver can see is
+satisfied and nothing has been produced. `ComponentSystem.finite()` now checks arclength and
+turning per edge, which is what a caller actually receives. `tests/diagnostics.test.ts`'s
+hairpin was passing on precisely this: at `breaks: 0` it reported `maxResidual` of exactly `0`
+and `ok: true` with all three segments at zero length.
+
+**A starving line search left the rejected trial applied.** When `t` fell below
+`MIN_RELAXATION` the loop broke without restoring `base`, so the last trial the search had just
+*refused* stayed in the DOF — which is how a bound the line search is enforcing gets defeated
+by the very step enforcing it.
+
+**`branch-obstruction`, which is the structural answer rather than a bound.** With the first
+three fixed, `spike` still wound twice out of 251 at any budget: the guard cut the steps, the
+run failed to land, and no fault named a joint, so §8's ladder never engaged. The guard now
+localizes. `ChainSystem` carries its own `baseTurning` and counts the trials cut while *it*
+held the component's maximum drift, and `faults()` raises `branch-obstruction` against
+`strainedEnd` of the drifting edge whenever the guard cut steps and the run still did not land
+— outcome, not history, since a search that starved once and then converged has been answered.
+It sorts second in `FAULT_ORDER`, below rank deficiency and above chord degeneracy: a segment
+driven onto another branch is what collapses the chord, but a singular constraint set is the
+deeper reading. The ladder then does what it already did, down to the corner configuration that
+always exists. Row four is that fault and nothing else.
+
+On the three-vertex `fold3` the fault never fires — the guarded solve converges cleanly, so
+there is nothing to answer — and the sweep is unchanged at `0.89t`. The ladder engages where
+the guard is insufficient and stays out of the way where it is not.
+
+**What it costs.** `fold4` runs 1033 ms/frame guarded against 438 unguarded, and `spike` 907
+against 366; each ladder attempt rebuilds the continuation rungs from `p = 0`, and these
+frames reach seven attempts. The unguarded column is not an option — it winds five frames out
+of 251 on `spike` — but a 2.4× on pathological frames is worth revisiting. Benign geometry is
+untouched: the guard costs nothing measurable on a chain that never approaches a branch.
+
+**Coverage is split deliberately.** The suite pins the mechanism on a static six-vertex zigzag,
+where the fault is raised, localized to joint 2, and answered with a break, and where `breaks: 0`
+returns `ok: false` and non-finite geometry instead. The 251-frame drags above are offline
+measurement: at roughly a second a frame they would quadruple the suite to pin what the static
+fixture already pins.
 
 ## 15. References
 
