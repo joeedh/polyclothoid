@@ -350,6 +350,40 @@ export function pairsToTaylor(a: ArrayLike<number>, p: number, f: Float64Array, 
   return { f, g };
 }
 
+const taylorScratch = new Float64Array(sPowerLength(MAX_SPOWER_ORDER));
+
+/**
+ * The order-`order` endpoint Taylor coefficients of an order-`p` polynomial, both ends.
+ *
+ * {@link pairsToTaylor} stops at `p`, which is all the *basis* carries as data. But the
+ * polynomial has degree `2p + 1`, so its higher endpoint derivatives exist and are determined
+ * — they are simply not free. Reading one of them is what `spower-solver.md` §9's degree
+ * continuation needs: the order-`p+1` block entry that would reproduce the order-`p` curve.
+ *
+ * Returned as `[f, g]` in {@link taylorToPairs}'s convention, so `g` carries the `(-1)^order`.
+ * Differentiating in the basis is exact (see {@link differentiateSPower}), and `order > 2p+1`
+ * gives zero rather than an error, which is the true answer.
+ */
+export function endpointTaylor(a: ArrayLike<number>, len: number, order: number): [number, number] {
+  const d = taylorScratch;
+
+  for (let i = 0; i < len; i++) {
+    d[i] = a[i];
+  }
+
+  let factorial = 1.0;
+
+  for (let k = 1; k <= order; k++) {
+    differentiateSPower(d, len, d);
+    factorial *= k;
+  }
+
+  const f = evalSPower(d, len, 0.0) / factorial;
+  const g = evalSPower(d, len, 1.0) / factorial;
+
+  return [f, (order & 1) === 0 ? g : -g];
+}
+
 /**
  * `(2p+2) x (2p+2)` differentiation matrix, row-major: `D * a` is `a'` in the same basis.
  *

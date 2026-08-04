@@ -67,7 +67,7 @@
  */
 import { type CurvatureProfile, sPowerProfile } from "./profile.js";
 import { type QuadratureOptions, defaultSPowerQuadrature } from "./quadrature.js";
-import { integralWeights, massMatrix, sPowerLength, stiffnessMatrix, taylorToPairs } from "./spower.js";
+import { endpointTaylor, integralWeights, massMatrix, sPowerLength, stiffnessMatrix, taylorToPairs } from "./spower.js";
 
 /** Number of scalars a single vertex owns at order `p`. */
 export function blockLength(p: number) {
@@ -127,6 +127,32 @@ export interface EdgeFrame {
 }
 
 /**
+ * Where entry `order` of one edge-end's block lands in the edge's Taylor data, and scaled by
+ * what — one column of `M_e` before {@link taylorToPairs} spreads it over the pairs.
+ *
+ * `far` picks the `g`-side, the expansion in `1 − u`; see the orientation note above. The
+ * weight is the `Rᵥ → L_e` rescale times the parity sign. Both halves are here rather than
+ * inline in {@link edgeTransform} because §9's continuation has to *invert* them, and a
+ * transform whose inverse is written out separately is a transform with two conventions.
+ */
+export function transformEntry(frame: EdgeFrame, earlier: boolean, order: number) {
+  const { arclength, rEarlier, rLater, forward } = frame;
+
+  const scale = arclength * Math.pow(arclength / (earlier ? rEarlier : rLater), order);
+  const even = (order & 1) === 0;
+
+  let sign: number;
+
+  if (forward) {
+    sign = earlier ? 1.0 : even ? 1.0 : -1.0;
+  } else {
+    sign = earlier ? -1.0 : even ? -1.0 : 1.0;
+  }
+
+  return { far: earlier !== forward, weight: sign * scale };
+}
+
+/**
  * The `(2p+2) × (2p+2)` matrix `M_e` mapping vertex DOF to s-power coefficients,
  * row-major, with DOF ordered `[block(earlier)₀…ₚ, block(later)₀…ₚ]` in **chain** order.
  *
@@ -145,7 +171,6 @@ export interface EdgeFrame {
 export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
   const n = sPowerLength(p);
   const m = out ?? new Float64Array(n * n);
-  const { arclength, rEarlier, rLater, forward } = frame;
 
   m.fill(0.0);
 
@@ -156,23 +181,11 @@ export function edgeTransform(p: number, frame: EdgeFrame, out?: Float64Array) {
   for (let c = 0; c < n; c++) {
     const earlier = c <= p;
     const order = earlier ? c : c - (p + 1);
-    const scale = arclength * Math.pow(arclength / (earlier ? rEarlier : rLater), order);
-
-    const even = (order & 1) === 0;
-
-    // `far` selects the g-side (the 1−u expansion); see the orientation note above.
-    const far = earlier !== forward;
-    let sign: number;
-
-    if (forward) {
-      sign = earlier ? 1.0 : even ? 1.0 : -1.0;
-    } else {
-      sign = earlier ? -1.0 : even ? -1.0 : 1.0;
-    }
+    const { far, weight } = transformEntry(frame, earlier, order);
 
     f.fill(0.0);
     g.fill(0.0);
-    (far ? g : f)[order] = sign * scale;
+    (far ? g : f)[order] = weight;
 
     taylorToPairs(f, g, p, col);
 
@@ -367,6 +380,32 @@ export function edgeCoefficients(p: number, frame: EdgeFrame, dof: ArrayLike<num
   const n = sPowerLength(p);
 
   return matrixTimesVector(edgeTransform(p, frame), dof, n, n, out);
+}
+
+/**
+ * The order-`p+1` block entry at one end of an edge that reproduces its order-`p` curvature
+ * there — §9's warm start, one number.
+ *
+ * The order-`p` blocks carry derivatives up to `p`, but the profile they reconstruct is a
+ * polynomial of degree `2p + 1`, so `dᵖ⁺¹κ/dsᵖ⁺¹` at the edge's ends is determined by them.
+ * That is the value §9 says a *preserving* continuation would need — and, in the same
+ * breath, says the two edges at a joint generally disagree about, since at the new ceiling
+ * they have to share it. So this is one edge's opinion; whoever seeds a shared entry has to
+ * reconcile them, and the reconciliation is where the curve moves.
+ *
+ * Read off the s-power Hermite polynomial `M_e · dof` whatever profile is in play. For the
+ * sampled control that is not the profile being *rendered* — a polyline has no `p+1`th
+ * derivative — but it is the polynomial the blocks mean, which is what a DOF-space warm start
+ * is entitled to use.
+ */
+export function continuationEntry(p: number, frame: EdgeFrame, dof: ArrayLike<number>, earlier: boolean) {
+  const order = p + 1;
+  const a = edgeCoefficients(p, frame, dof);
+  const taylor = endpointTaylor(a, sPowerLength(p), order);
+
+  const { far, weight } = transformEntry(frame, earlier, order);
+
+  return weight === 0.0 ? 0.0 : taylor[far ? 1 : 0] / weight;
 }
 
 /**

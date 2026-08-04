@@ -43,7 +43,7 @@
  * on a four-edge zigzag before the factorization hands back `NaN`.
  */
 import { BandedSymmetric, type KKTSolveOptions, defaultKKTSolveOptions, rankRatio, solveKKT } from "../math/index.js";
-import { type EdgeFrame, type ProfileDOF, referenceLength, sPowerDOF } from "./blocks.js";
+import { type EdgeFrame, type ProfileDOF, continuationEntry, referenceLength, sPowerDOF } from "./blocks.js";
 import {
   type Diagnostic,
   type DiagnosticCondition,
@@ -144,6 +144,21 @@ export interface SPowerSolverOptions {
   mode: "artistic" | "engineering";
 
   /**
+   * Climb `p = 0 … order`, warm-starting each rung from the one below — §9.
+   *
+   * A warm start and not an embedding: the low-order entries of a block mean the same thing at
+   * every order, so they carry over unchanged, but the new top entry cannot preserve the curve
+   * — §9's argument is that the two edges at a joint want different values for it and the
+   * ceiling makes them share one. So the rung below supplies a *starting point*, not a
+   * solution, and the claim being tested is "fewer Newton steps" and nothing stronger. §14 has
+   * what it measured.
+   *
+   * Off by default: it is only worth its extra assemblies where the top rung is struggling,
+   * which at `p = 1` it generally is not.
+   */
+  continuation: boolean;
+
+  /**
    * How many levels one chain may lose in a single solve, across all its joints.
    *
    * Three walks a `p = 1` joint the whole way from `G3` to a corner, so the default cannot
@@ -155,17 +170,18 @@ export interface SPowerSolverOptions {
 }
 
 export const defaultSPowerSolverOptions: SPowerSolverOptions = {
-  order     : SPOWER_ORDER,
-  alpha     : 0.1,
-  iterations: 100,
-  relaxation: 1.0,
-  tolerance : 1e-10,
-  dof       : sPowerDOF,
-  jacobian  : "exact",
-  trace     : false,
-  mode      : "artistic",
-  breaks    : 3,
-  kkt       : {},
+  order       : SPOWER_ORDER,
+  alpha       : 0.1,
+  iterations  : 100,
+  relaxation  : 1.0,
+  tolerance   : 1e-10,
+  dof         : sPowerDOF,
+  jacobian    : "exact",
+  trace       : false,
+  mode        : "artistic",
+  continuation: false,
+  breaks      : 3,
+  kkt         : {},
 };
 
 export interface SPowerSolverReport extends SolveReport {
@@ -198,6 +214,14 @@ export interface SPowerSolverReport extends SolveReport {
 
   /** Chain solves run, including the attempts thrown away. `chains − skippedClosed` when nothing broke. */
   attempts: number;
+
+  /**
+   * Steps spent on continuation rungs below `order`, and not counted in {@link steps} — §9.
+   *
+   * The price of the warm start, kept separate from what it bought so the two can be compared
+   * without arithmetic. Zero unless {@link SPowerSolverOptions.continuation} is on.
+   */
+  seedSteps: number;
 }
 
 function emptyReport(): SPowerSolverReport {
@@ -209,6 +233,7 @@ function emptyReport(): SPowerSolverReport {
     steps        : 0,
     degraded     : 0,
     attempts     : 0,
+    seedSteps    : 0,
     ok           : true,
     diagnostics  : [],
   };
@@ -551,6 +576,63 @@ export class ChainSystem {
   /** Global index of local DOF `k` of edge `i`, whose DOF are its two blocks in chain order. */
   at(i: number, k: number) {
     return k < this.block ? this.slot(i, k, false) : this.slot(i + 1, k - this.block, true);
+  }
+
+  /**
+   * Take this system's starting point from a converged solve one order below — §9's rung.
+   *
+   * Three things move across. The entries both orders have mean the same thing at every order
+   * — `(Rᵥⁿ/n!)·dⁿκ/dsⁿ` is not a function of `p` — so they carry over untouched. The
+   * arclengths carry over too, which replaces the `L_e = C_e` seed with a measured one and is
+   * the part that costs nothing and is never wrong. And the new top entry is read off the
+   * curve the rung below actually produced, via {@link continuationEntry}.
+   *
+   * That last one is where §9's "warm start, not an embedding" bites: the two edges at a joint
+   * disagree about the new derivative, and at the ceiling they must share one number, so what
+   * lands there is their average and the curve moves. Averaging by incidence count does the
+   * right thing at both ends of the chain and at a split joint without a special case, since
+   * a split entry is only written by the one end that owns it.
+   */
+  seedFrom(prev: ChainSystem) {
+    const { verts, edges } = this.chain;
+    const carry = Math.min(prev.block, this.block);
+    const counts = new Float64Array(this.n);
+
+    for (let i = 0; i < verts.length; i++) {
+      for (let n = 0; n < carry; n++) {
+        for (const arriving of [true, false]) {
+          this.z[this.slot(i, n, arriving)] = prev.z[prev.slot(i, n, arriving)];
+        }
+      }
+    }
+
+    if (this.block > prev.block) {
+      const scratch = new Float64Array(2 * prev.block);
+
+      for (let e = 0; e < edges.length; e++) {
+        for (let k = 0; k < scratch.length; k++) {
+          scratch[k] = prev.z[prev.at(e, k)];
+        }
+
+        for (const earlier of [true, false]) {
+          const at = this.slot(earlier ? e : e + 1, prev.block, !earlier);
+          const value = continuationEntry(prev.p, prev.frames[e], scratch, earlier);
+
+          this.z[at] += value;
+          counts[at]++;
+        }
+      }
+
+      for (let i = 0; i < this.n; i++) {
+        if (counts[i] > 1) {
+          this.z[i] /= counts[i];
+        }
+      }
+    }
+
+    for (let e = 0; e < edges.length; e++) {
+      this.frames[e].arclength = prev.frames[e].arclength;
+    }
   }
 
   /** Push the current DOF through `M_e` into each curve's coefficients. */
@@ -1310,11 +1392,8 @@ export class SPowerSolver implements CurveSolver {
     const caps = new Map<SolvableVertex, number>();
     const actions: Diagnostic[] = [];
 
-    let system = new ChainSystem(chain, refs, opts, caps);
-    let run = system.run();
+    let { system, run } = this.ladder(chain, refs, caps, report);
     let refused = false;
-
-    report.attempts++;
 
     for (let attempt = 0; attempt < opts.breaks; attempt++) {
       const faults = system.faults(run, this.broken);
@@ -1346,10 +1425,7 @@ export class SPowerSolver implements CurveSolver {
       actions.push(this.record(fault, "degraded", index, system, to));
       caps.set(fault.vertex, to);
 
-      system = new ChainSystem(chain, refs, opts, caps);
-      run = system.run();
-
-      report.attempts++;
+      ({ system, run } = this.ladder(chain, refs, caps, report));
     }
 
     for (let i = 1; i < chain.edges.length; i++) {
@@ -1375,6 +1451,55 @@ export class SPowerSolver implements CurveSolver {
     if (run.trace) {
       report.traces?.push({ chain: index, steps: run.trace });
     }
+  }
+
+  /**
+   * Build and solve one chain at the requested order, climbing to it if §9's continuation is
+   * on. Returns the top rung, which is the only one whose answer counts.
+   *
+   * A rung that failed is not seeded from: a warm start built out of a broken solve is worse
+   * than no warm start, and the failure is the top rung's to rediscover and report. The ladder
+   * is rebuilt from `p = 0` after every break rather than resumed, because a lowered level
+   * changes the layout at every order and the rungs below have to answer the same question the
+   * top one is being asked.
+   */
+  ladder(
+    chain: Chain,
+    refs: Map<SolvableVertex, number>,
+    caps: Map<SolvableVertex, number>,
+    report: SPowerSolverReport
+  ) {
+    const opts = this.options;
+    const first = opts.continuation ? 0 : opts.order;
+
+    let system!: ChainSystem;
+    let run!: ChainRun;
+    let seed: ChainSystem | undefined;
+
+    for (let p = first; p <= opts.order; p++) {
+      system = new ChainSystem(chain, refs, p === opts.order ? opts : { ...opts, order: p }, caps);
+
+      if (seed) {
+        system.seedFrom(seed);
+      }
+
+      run = system.run();
+
+      if (p < opts.order) {
+        report.seedSteps += run.steps;
+
+        // §8's criteria are exactly "this answer cannot be trusted", and a warm start is a way
+        // of trusting one. A rung that trips any of them, or that stopped short of its own
+        // tolerance, is not seeded from.
+        const converged = run.ok && run.residual < opts.tolerance;
+
+        seed = converged && system.faults(run).length === 0 ? system : seed;
+      }
+    }
+
+    report.attempts++;
+
+    return { system, run };
   }
 
   /**

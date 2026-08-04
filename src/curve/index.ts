@@ -64,6 +64,7 @@ export {
   MAX_SPOWER_ORDER,
   differentiateSPower,
   differentiationMatrix,
+  endpointTaylor,
   evalSPower,
   hik,
   integralWeights,
@@ -97,6 +98,7 @@ export {
 export {
   blockLength,
   congruence,
+  continuationEntry,
   edgeCoefficients,
   edgeDOFLength,
   edgeEnergy,
@@ -109,6 +111,7 @@ export {
   referenceLength,
   rowTimesMatrix,
   sPowerDOF,
+  transformEntry,
   type EdgeFrame,
   type ProfileDOF,
 } from "./blocks.js";

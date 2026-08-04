@@ -855,7 +855,7 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
-**Status: 0a, 0b, 1, 2, 3, 4, 5 and 6 are done; both gates passed.** See §14 for the
+**Status: 0a, 0b, 1, 2, 3, 4, 5, 6 and 7 are done; both gates passed.** See §14 for the
 measurements.
 Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
 predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
@@ -985,6 +985,19 @@ that a degraded solve is indistinguishable from one whose author asked for the l
 
 **Phase 7 — continuation.** `p = 0 → 2`. Report the iteration-count improvement (§9); the
 phase is only worth keeping if there is one. *Small.*
+
+There is one, and it is not enough. `SPowerSolverOptions.continuation` climbs `p = 0 … order`
+and the top rung takes fewer steps on every fixture tried — up to 43% fewer at `p = 2` — but
+the rungs below cost more wall-clock than the steps they save, on every fixture, by 13–49%.
+So the phase lands and stays off by default. §14 has the table and the reason the two
+measurements disagree.
+
+Two pieces of it are worth more than the ladder. `continuationEntry` reads the `p+1`th
+endpoint derivative the order-`p` blocks already imply, which reproduces a rung's curve
+*exactly* per edge — so every difference between rungs is the joint reconciliation §9
+predicted, and nothing else. And the seed gate turned out to be the load-bearing part: a rung
+is seeded from only if it converged and tripped no §8 criterion. Without that, a rung that
+had run away seeded a top rung that then failed where a cold start had succeeded.
 
 **Phase 8 — general valence.** Node/chain decomposition, the per-order partitions, the Schur
 complement including the two coupling caveats in §5. Phase 2 should be written with the
@@ -1449,6 +1462,51 @@ break signal for the wrong-looking reason.
 neither free nor localizable: a Hager–Higham estimate costs several solves against a
 factorization the quasi-definite path never forms, and what it returns is one number for a
 whole chain, which is not a *located* record and so cannot drive a break at a joint.
+
+### Phase 7 — what continuation buys (`tests/continuation.test.ts`)
+
+Cold against warm, five chains, at the two orders above the continuation seed. `steps` is the
+top rung only; `seed` is everything below it. Times are a mean over sixty solves:
+
+| fixture | `p` | cold steps | warm steps | seed | cold | warm |
+| --- | --- | --- | --- | --- | --- | --- |
+| zigzag (4 edges) | 1 | 10 | 8 | 11 | 2.59 ms | 3.74 ms |
+| arc (4) | 1 | 4 | 4 | 4 | 1.03 ms | 1.37 ms |
+| spiral (8) | 1 | 7 | 6 | 7 | 2.81 ms | 4.40 ms |
+| wobble (7) | 1 | 9 | 8 | 9 | 2.48 ms | 4.68 ms |
+| wobble (15) | 1 | 9 | 8 | 9 | 6.39 ms | 8.61 ms |
+| zigzag | 2 | 10 | 8 | 19 | 3.46 ms | 4.93 ms |
+| arc | 2 | 4 | **2** | 8 | 1.67 ms | 2.16 ms |
+| spiral | 2 | 7 | **4** | 13 | 5.02 ms | 7.53 ms |
+| wobble (7) | 2 | 9 | **6** | 17 | 5.77 ms | 8.70 ms |
+| wobble (15) | 2 | 9 | **6** | 17 | 12.13 ms | 18.03 ms |
+
+**The improvement §12 asked for is real, and it grows with `p`** — 0–14% at `p = 1`, 20–50%
+at `p = 2`, which is what a warm start should do as the state space it warms gets larger.
+
+**And it is not worth paying for.** Every warm run is slower in wall-clock. The reason the two
+columns disagree is that a step is not `O((p+1)³)`-dominated at these sizes: the factorization
+is a band of width `4p + 6` over a few dozen unknowns, while every step also integrates each
+edge's profile at nineteen quadrature nodes and rebuilds `M_e` and `H` from the new arclength.
+That part is very nearly independent of `p`, so a `p = 0` step costs on the order of a `p = 2`
+step, and eight of them to save three is a bad trade at any order the plan cares about. The
+ladder would start paying if a rung were cheap in the way the cost model implies — a coarser
+quadrature at low order, say — but that is a different change and §12 did not ask for it.
+
+**The per-edge seed is exact, so the joint is the whole story.** An order-`p` profile is a
+polynomial of degree `2p+1`, hence its own order-`p+1` Hermite interpolant, and
+`continuationEntry` reproduces it to `2.2e-16` over every frame orientation and every
+`p = 0, 1, 2`. So none of the residual gap between rungs is representation loss: it is entirely
+§9's point that the two edges at a joint want different `dᵖ⁺¹κ/dsᵖ⁺¹` and the ceiling makes
+them share one. What lands there is their average.
+
+**A warm start built on a bad rung is worse than no warm start.** The first version seeded from
+any rung that factored and returned a finite residual, which let the runaway of the Phase 5
+notes — the one with `maxResidual` exactly `0.0` and `canonical = 2e145` — seed the rung above
+it. On a hairpin pair at `p = 1` that turned a cold run of twelve steps into a warm one of a
+hundred ending in `NaN`, and with the frozen Jacobian a stall at `1.35` into the same. Gating
+the seed on convergence *and* on §8's criteria being clean makes both cases identical to a cold
+start, which is the correct floor: continuation may cost a rung, and may not cost an answer.
 
 ## 15. References
 
