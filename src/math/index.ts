@@ -8,9 +8,12 @@ export { columnPivotedQR, rankRatio, type QRRank } from "./qr.js";
 export {
   BandedSymmetric,
   BandedLDL,
+  KKTFactorization,
   ruizEquilibrate,
   solveKKT,
   defaultKKTSolveOptions,
   type KKTSolveOptions,
   type KKTSolveResult,
 } from "./banded.js";
+
+export { DenseLU } from "./dense.js";

@@ -578,7 +578,7 @@ describe("Phase 2: SPowerSolver", () => {
     }
   });
 
-  it("skips a closed chain rather than solving a cyclic band", () => {
+  it("cuts a closed chain open rather than solving a cyclic band", () => {
     const { mesh, verts } = polyline([
       [0, 0],
       [1, 0],
@@ -591,8 +591,15 @@ describe("Phase 2: SPowerSolver", () => {
     const report = new SPowerSolver(mesh).solve();
 
     assert.equal(report.chains, 1);
-    assert.equal(report.skippedClosed, 1);
-    assert.equal(report.steps, 0);
+    assert.equal(report.cutClosed, 1);
+    assert.ok(report.steps > 0, "a cut chain is solved, not skipped");
+    assert.ok(report.ok, `closed chain did not converge: ${report.maxResidual}`);
+
+    // The cut vertex is one vertex seen twice, and the wrap-around is the whole point of the
+    // cut: the two halves have to agree there as they do at every other joint.
+    for (const e of mesh.edges) {
+      assert.ok(Number.isFinite((e.curve as SPowerClothoid).length), "arclength went non-finite");
+    }
   });
 
   it("solves each chain of a junction independently", () => {

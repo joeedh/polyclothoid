@@ -80,8 +80,12 @@ export class BandedSymmetric {
     return out;
   }
 
+  /*
+    `out` is annotated rather than inferred from its default: inference would pin it to
+    `Float64Array<ArrayBuffer>` and reject any caller holding a plainly declared one.
+  */
   /** `out = A·x`, reading the stored lower band as symmetric. */
-  apply(x: Float64Array, out = new Float64Array(this.n)) {
+  apply(x: Float64Array, out: Float64Array = new Float64Array(this.n)) {
     const { n, bandwidth, data } = this;
 
     out.fill(0.0);
@@ -303,11 +307,113 @@ export interface KKTSolveResult {
 }
 
 /**
+ * One equilibrated, shifted `LDLᵀ` of a KKT matrix, reusable across right-hand sides.
+ *
+ * Separate from {@link solveKKT} because §5's substructuring needs `A⁻¹B` as well as
+ * `A⁻¹b` — one solve per interface column, all against the same matrix. Factoring per
+ * column would put the `O(n·b²)` factorization inside a loop it does not belong in.
+ *
+ * `a` is not modified: the equilibration and the shift are applied to working copies, so
+ * refinement has an unperturbed matrix to measure against.
+ */
+export class KKTFactorization {
+  options: KKTSolveOptions;
+
+  /** Equilibrated but unshifted — what refinement measures the residual against. */
+  scaled: BandedSymmetric;
+
+  /** Ruiz scaling, applied to the right-hand side going in and the solution coming out. */
+  scaling: Float64Array;
+
+  ldl: BandedLDL;
+
+  /** False if a pivot underflowed, which means `delta` is too small for this system. */
+  ok: boolean;
+
+  private work: Float64Array;
+  private rhs: Float64Array;
+
+  constructor(a: BandedSymmetric, constraintRows: Iterable<number>, options: Partial<KKTSolveOptions> = {}) {
+    const opts = { ...defaultKKTSolveOptions, ...options };
+    const n = a.n;
+
+    this.options = opts;
+    this.scaled = a.copyTo();
+    this.scaling =
+      opts.equilibration > 0 ? ruizEquilibrate(this.scaled, opts.equilibration) : new Float64Array(n).fill(1.0);
+
+    const shifted = this.scaled.copyTo();
+
+    for (const i of constraintRows) {
+      shifted.add(i, i, -opts.delta);
+    }
+
+    this.ldl = new BandedLDL(shifted);
+    this.ok = this.ldl.factor();
+
+    this.work = new Float64Array(n);
+    this.rhs = new Float64Array(n);
+  }
+
+  /** Solve `A x = b`, refining against the unshifted matrix. `b` is not modified. */
+  solve(b: Float64Array, out?: Float64Array): KKTSolveResult {
+    const { scaled, scaling, ldl, options: opts } = this;
+    const n = scaled.n;
+    const x = out ?? new Float64Array(n);
+
+    if (!this.ok) {
+      x.fill(0.0);
+
+      return { x, residual: Infinity, ok: false };
+    }
+
+    const rhs = this.rhs;
+
+    for (let i = 0; i < n; i++) {
+      rhs[i] = b[i] * scaling[i];
+      x[i] = rhs[i];
+    }
+
+    ldl.solveInPlace(x);
+
+    const work = this.work;
+    let residual = Infinity;
+
+    for (let pass = 0; pass <= opts.refinement; pass++) {
+      scaled.apply(x, work);
+
+      residual = 0.0;
+
+      for (let i = 0; i < n; i++) {
+        work[i] = rhs[i] - work[i];
+        residual = Math.max(residual, Math.abs(work[i]));
+      }
+
+      if (pass === opts.refinement) {
+        break;
+      }
+
+      ldl.solveInPlace(work);
+
+      for (let i = 0; i < n; i++) {
+        x[i] += work[i];
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      x[i] *= scaling[i];
+    }
+
+    return { x, residual, ok: true };
+  }
+}
+
+/**
  * Solve the symmetric indefinite system `A x = b`, where `A` is quasi-definite once the
  * rows listed in `constraintRows` are shifted by `−δ`.
  *
- * `a` is not modified; the equilibration and the shift are applied to a working copy so
- * that refinement has an unperturbed matrix to measure against.
+ * `a` is not modified. Factor once and solve many with {@link KKTFactorization} instead when
+ * there is more than one right-hand side.
  */
 export function solveKKT(
   a: BandedSymmetric,
@@ -315,60 +421,5 @@ export function solveKKT(
   constraintRows: Iterable<number>,
   options: Partial<KKTSolveOptions> = {}
 ): KKTSolveResult {
-  const opts = { ...defaultKKTSolveOptions, ...options };
-
-  const n = a.n;
-  const scaled = a.copyTo();
-  const s = opts.equilibration > 0 ? ruizEquilibrate(scaled, opts.equilibration) : new Float64Array(n).fill(1.0);
-
-  const rhs = new Float64Array(n);
-
-  for (let i = 0; i < n; i++) {
-    rhs[i] = b[i] * s[i];
-  }
-
-  const shifted = scaled.copyTo();
-
-  for (const i of constraintRows) {
-    shifted.add(i, i, -opts.delta);
-  }
-
-  const ldl = new BandedLDL(shifted);
-
-  if (!ldl.factor()) {
-    return { x: new Float64Array(n), residual: Infinity, ok: false };
-  }
-
-  const x = new Float64Array(rhs);
-  ldl.solveInPlace(x);
-
-  const work = new Float64Array(n);
-  let residual = Infinity;
-
-  for (let pass = 0; pass <= opts.refinement; pass++) {
-    scaled.apply(x, work);
-
-    residual = 0.0;
-
-    for (let i = 0; i < n; i++) {
-      work[i] = rhs[i] - work[i];
-      residual = Math.max(residual, Math.abs(work[i]));
-    }
-
-    if (pass === opts.refinement) {
-      break;
-    }
-
-    ldl.solveInPlace(work);
-
-    for (let i = 0; i < n; i++) {
-      x[i] += work[i];
-    }
-  }
-
-  for (let i = 0; i < n; i++) {
-    x[i] *= s[i];
-  }
-
-  return { x, residual, ok: true };
+  return new KKTFactorization(a, constraintRows, options).solve(b);
 }

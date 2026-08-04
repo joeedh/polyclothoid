@@ -39,15 +39,42 @@ Strictly one-directional. Nothing lower may import from something higher.
 
 | Layer | Files | Lines | Owns |
 | --- | --- | --- | --- |
-| `src/math` | `vector.ts`, `vec3_mixin.ts`, `util.ts`, `solver.ts` | ~760 | The slice of path.ux the stroker actually used, vendored. |
-| `src/curve` | `curve.ts`, `mesh_types.ts`, `clothoid.ts`, `bezier.ts`, `bspline.ts` | ~1090 | Curve primitives and their per-type solvers. Knows no topology beyond "an edge has two vertices". |
-| `src/mesh` | `mesh.ts`, `colors.ts` | ~990 | Half-edge topology, selection and flag state, serialization, curve-type dispatch. |
+| `src/math` | `vector.ts`, `vec3_mixin.ts`, `util.ts`, `solver.ts`, `qr.ts`, `banded.ts`, `dense.ts` | ~1300 | The slice of path.ux the stroker actually used, vendored, plus the linear algebra the s-power solver needs. |
+| `src/curve` | `curve.ts`, `mesh_types.ts`, `clothoid.ts`, `bezier.ts`, `bspline.ts`, and the s-power group below | ~5470 | Curve primitives and their per-type solvers. Knows no topology beyond "an edge has two vertices" — except `topology.ts`/`junctions.ts`, which know it structurally. |
+| `src/mesh` | `mesh.ts`, `colors.ts` | ~1070 | Half-edge topology, selection and flag state, serialization, curve-type dispatch. |
 | `src/stroke.ts` | — | ~130 | The only stateful, streaming thing in the library. |
 | `src/demo` | `main.ts`, `render.ts`, `ui.ts`, `dabs.ts` | ~570 | Canvas, events, controls. Excluded from the library bundle. |
 
 `math/` has no project imports at all. `demo/` sits outside the stack and consumes the
 public barrel exactly as an external caller would, which is the cheapest available check
 that the barrel is actually sufficient.
+
+### The s-power group
+
+Most of `curve/` is now one subsystem, designed in `docs/plans/spower-solver.md` and built
+in the phases that document tracks. It is a second curve type and a second solver, sitting
+beside `Clothoid`/`ClothoidSolver` rather than replacing them:
+
+| File | Owns |
+| --- | --- |
+| `spower.ts` | Sánchez-Reyes' polynomial s-power basis. Pure scalar math — no curve, no mesh. |
+| `spower_clothoid.ts` | The segment: integrate an s-power `κ`, place the result on `v1 → v2`. |
+| `profile.ts` | Curvature profiles shared by both clothoid types. |
+| `quadrature.ts` | The Taylor position integrator with the step count as a parameter. |
+| `samples.ts` | The piecewise-linear profile as a DOF — §12's control experiment. |
+| `blocks.ts` | Vertex-owned curvature DOF, and the per-edge transform into s-power coefficients. |
+| `pairing.ts` | Continuity levels, and the per-order partitions they induce on a vertex. |
+| `topology.ts` | Nodes and chains: the mesh decomposed into maximal valence-2 runs. |
+| `junctions.ts` | The solve-side reading of that decomposition — which unknowns two chains share. |
+| `spower_solver.ts` | Gauss-Newton over a banded KKT system, with a Schur complement across chains. |
+| `diagnostics.ts` | Located, typed records of what the solver broke and why. |
+
+Unknowns live on **vertices**, not edges, which is why the solver needs topology at all: an
+edge reads its coefficients out of the blocks at both ends, so neighbouring edges are coupled
+through shared storage before any constraint is written. `topology.ts` cuts the mesh into
+chains so each one is a band; `junctions.ts` says what is left over, and `spower_solver.ts`
+eliminates onto it. `math/banded.ts` and `math/dense.ts` are the two factorizations that
+serve those halves — quasi-definite band for the chains, LU for the interface.
 
 ## The two seams
 
@@ -172,8 +199,9 @@ export { Stroker, type StrokeCallback, type StrokerOptions } from "./stroke.js";
 | --- | --- |
 | Entry point | `Stroker`, `StrokeCallback`, `StrokerOptions` |
 | Mesh | `Mesh`, `Element`, `Vertex`, `Handle`, `Edge`, `Loop`, `LoopList`, `Face`, `ElementArray`, `ElementSet`, `MeshTypes`, `MeshFlags`, `RecalcFlags`, `CurveConstructor`, `CurveSolverConstructor`, `ElemColors`, `getElemColor` |
-| Curves | `Curve`, `Clothoid`, `ClothoidSolver`, `CubicBezier`, `BezierSolver`, `BSpline`, `BSplinePoint`, `BSplineSolver` |
-| Curve support | `Canvas2DLike`, `CanvasPaint`, `CurveVertex`, `CurveEdge`, `SolvableMesh`, `SolvableEdge`, `SolvableVertex`, `CurveSolver`, `CurvatureProfile`, `activeProfile`, `setCurvatureProfile`, `piecewiseLinear`, `circleArc`, `bernsteinCurvature`, the `K*` parameter-slot indices, `ClothoidSolverOptions` |
+| Curves | `Curve`, `Clothoid`, `ClothoidSolver`, `SPowerClothoid`, `SPowerSolver`, `CubicBezier`, `BezierSolver`, `BSpline`, `BSplinePoint`, `BSplineSolver` |
+| Curve support | `Canvas2DLike`, `CanvasPaint`, `CurveVertex`, `CurveEdge`, `SolvableMesh`, `SolvableEdge`, `SolvableVertex`, `CurveSolver`, `CurvatureProfile`, `activeProfile`, `setCurvatureProfile`, `piecewiseLinear`, `circleArc`, `sPowerProfile`, `bernsteinCurvature`, the `K*` parameter-slot indices, `ClothoidSolverOptions` |
+| S-power internals | Everything the s-power group's modules export, flat — the basis (`evalSPower`, `massMatrix`, …), the DOF layer (`edgeTransform`, `sPowerDOF`, …), levels (`maxLevel`, `vertexPartitions`, …), decomposition (`chains`, `cutOpen`, `components`, `interfaceSlots`), the solve (`ComponentSystem`, `SPowerSolverOptions`, `SolveReport`) |
 | Math | `Vector2/3/4`, `VecLike`, `Vec3Mixin`, `applyVec3Mixin`, `CacheRing`, `IDGen`, `Constraint`, `Solver`, `fract`, `clamp`, `binomial`, `listRemove`, `time_ms` |
 
 Most consumers want `Stroker` and nothing else. The rest is exported because the demo needs

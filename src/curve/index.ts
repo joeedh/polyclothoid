@@ -6,7 +6,9 @@ export {
   type SolvableMesh,
   type SolvableVertex,
 } from "./mesh_types.js";
-export { chains, walk, type Chain } from "./topology.js";
+export { chains, cutOpen, walk, type Chain } from "./topology.js";
+
+export { chainEnds, components, interfaceSlots, type ChainEnd, type Component, type GammaSlot } from "./junctions.js";
 
 export {
   defaultLevel,
@@ -129,9 +131,10 @@ export {
 export { SPOWER_ORDER, SPowerClothoid } from "./spower_clothoid.js";
 
 export {
+  ComponentSystem,
   SPowerSolver,
   defaultSPowerSolverOptions,
-  type ChainRun,
+  type ComponentRun,
   type Fault,
   type SPowerSolverOptions,
   type SPowerSolverReport,

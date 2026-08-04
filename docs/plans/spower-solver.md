@@ -1004,6 +1004,34 @@ complement including the two coupling caveats in §5. Phase 2 should be written 
 partitions already in the data model even though every group starts at size 2, so this phase
 is decomposition and elimination only, not a representation change. *Medium.*
 
+It was a decomposition, and the prediction held: `layout`, `slot`, `at`, `assemble` and
+`write` are untouched. `ChainSystem` gained two parallel arrays — `localToGlobal`, an
+interface index per local unknown, and `localSign` — and nothing in the class reads either.
+`curve/junctions.ts` turns the §3 partitions into the interface, `ComponentSystem` routes
+each assembled band entry into `Aᵢ`, `Bᵢ` or `D` by lookup, and `ChainSystem.run()` is now
+`new ComponentSystem([this], []).run()`, which with an empty interface delegates straight to
+the Phase 2 `KKTFactorization`. So the existing 147 tests were the regression suite for the
+new path, down to the units the refinement diagnostic reports in.
+
+Both §5 caveats landed where §5 put them. A level-1 pairing shares no block and still couples,
+so `GammaSlot` has a `"row"` case beside its `"entry"` case; `Rᵥ` needed nothing, being chord-
+derived and therefore solver input. Closed chains take §5's second option — `cutOpen` repeats
+the first vertex at the end and the wrap-around goes through the junction machinery, which on
+a regular octagon leaves the cut indistinguishable from any other joint to `1e-6`.
+
+The one thing §5 did not warn about is *orientation*. A vertex block is written along the
+direction its chain travels through the vertex, and two chains meeting at a node need not
+travel the same way — so identification across the interface is `z_local = σ·γ` with
+`σ = (−1)^{n+1}` when both ends are the same end of their chains. Getting it wrong is quiet:
+the tangent row carries its own `π` and still closes, the solve still converges, and it
+converges onto `κ_a = −κ_b` — a curvature jump twice the size of the one the pairing asked to
+remove. `ComponentSystem.orientation` is four lines and was the whole of the phase's debugging.
+
+One gap, deliberate. §8's fault localization still runs chain-interior only: a junction joint
+is never lowered. Nothing in the machinery forces that — every criterion is measurable at a
+node — and it costs nothing today, because §3 defaults valence ≥ 3 to fully split and a joint
+at level 0 has nothing left to give. It becomes real as soon as authored junctions are common.
+
 **Phase 9 — width as a second profile.** The bounded-variable QP, the data term, the
 `h·|κ| < 1` check (§10). *Medium.*
 
@@ -1507,6 +1535,67 @@ it. On a hairpin pair at `p = 1` that turned a cold run of twelve steps into a w
 hundred ending in `NaN`, and with the frozen Jacobian a stall at `1.35` into the same. Gating
 the seed on convergence *and* on §8's criteria being clean makes both cases identical to a cold
 start, which is the correct floor: continuation may cost a rung, and may not cost an answer.
+
+### Phase 8 — general valence (`tests/junctions.test.ts`)
+
+**The interface is small, which is the whole bet §5 makes.** A star of `k` arms, every
+consecutive pair authored, at `p = 1`. `n` is the component's total unknown count, `m` the
+Schur complement's dimension — the only part solved densely:
+
+| arms | level 1 | level 2 | level 3 |
+| --- | --- | --- | --- |
+| 2 | `m = 0`, `n = 21` | `m = 0`, `n = 20` | `m = 0`, `n = 19` |
+| 3 | `m = 2`, `n = 32` | `m = 3`, `n = 30` | `m = 4`, `n = 28` |
+| 4 | `m = 3`, `n = 43` | `m = 4`, `n = 40` | `m = 5`, `n = 37` |
+| 6 | `m = 5`, `n = 65` | `m = 6`, `n = 60` | `m = 7`, `n = 55` |
+
+`m` grows as `(k − 1) + k·(entries per pairing)` and `n` grows with the *edges*, so the dense
+block stays a rounding error against the band as a mesh gets larger rather than merely
+starrier. Valence 2 is `m = 0` at every level: one chain walks straight through, and the
+coupling that would have been an interface is an interior joint the band already carries.
+
+**A closed loop comes out exact.** A regular `n`-gon, cut at an arbitrary vertex and
+reconciled through the same machinery two chains use, has to solve to a circular arc with no
+trace of the cut. It does, in two steps:
+
+| `n` | steps | solved `len` | exact `2π/n` | length spread | coefficient spread | cut G1 | cut G2 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 6 | 2 | 1.047198 | 1.047198 | 8.9e-16 | 4.1e-15 | 6.7e-16 | 1.1e-16 |
+| 8 | 2 | 0.785398 | 0.785398 | 6.7e-16 | 2.6e-15 | 6.7e-16 | 0 |
+| 12 | 2 | 0.523599 | 0.523599 | 1.1e-15 | 2.8e-15 | 0 | 0 |
+
+Spreads are max-minus-min over all `n` edges, absolute rather than relative because the higher
+coefficients of a circle are zero. Everything here is at the noise floor, so the cut vertex is
+not distinguishable from the `n − 1` real ones by any measurement the fixture affords.
+
+**Continuity through a junction is delivered, and only where it was asked for.** Three arms,
+arms 0 and 1 paired, arm 2 left alone:
+
+| level | components | steps | G1 across the pairing | G2 | G1 to the unpaired arm |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 3 | 0 | 1.05 | — | 1.05 |
+| 1 | 2 | 5 | 2.0e-12 | — | 1.57 |
+| 2 | 2 | 5 | 2.0e-12 | 6.7e-16 | 1.57 |
+| 3 | 2 | 5 | 6.3e-13 | 0 | 1.57 |
+
+Level 0 takes *zero* steps and three components: with nothing authored there is nothing to
+solve, which is §3's default policy doing what it promises. The unpaired arm holds a gap of
+1.57 rad throughout — the coupling reaches exactly the ends that named each other.
+
+**The bug this phase actually had was orientation, and §5 does not mention it.** `transformEntry`
+writes a vertex block in *chain-walk* coordinates, so a block holds `Rᵥⁿ/n!·dⁿκ/dsⁿ` along the
+direction its chain travels through the node. Two chains meeting there need not agree, and
+identification across the interface is `z_local = σγ` with `σ = (−1)ⁿ⁺¹` when they disagree.
+Omitting `σ` entirely converges — `report.ok`, residual at tolerance — and leaves a curvature
+jump of `3.85e-2` at a level-2 two-way junction. That is the failure mode worth recording: the
+sign is invisible to everything except the geometry it was supposed to produce.
+
+The generalization has the same shape. Reading "disagrees" off a single reference end is
+consistent for two and wrong for three, because *opposed iff same `end`* is not a valid
+2-coloring — three arms all leaving a hub cannot pairwise be smooth continuations. On the
+all-pairs three-arm star that scheme converged in 12 steps to G1 `2.7e-11` and G2 **`4.12`**.
+Reading the signs off the same spanning tree the G1 rows already use gives the same 12 steps,
+the same G1, and G2 `7.97e-27`.
 
 ## 15. References
 

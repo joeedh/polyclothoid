@@ -42,7 +42,14 @@
  * without a merit test the coefficients ratchet, reaching `1e+70` by the sixty-fourth pass
  * on a four-edge zigzag before the factorization hands back `NaN`.
  */
-import { BandedSymmetric, type KKTSolveOptions, defaultKKTSolveOptions, rankRatio, solveKKT } from "../math/index.js";
+import {
+  BandedSymmetric,
+  DenseLU,
+  KKTFactorization,
+  type KKTSolveOptions,
+  defaultKKTSolveOptions,
+  rankRatio,
+} from "../math/index.js";
 import { type EdgeFrame, type ProfileDOF, continuationEntry, referenceLength, sPowerDOF } from "./blocks.js";
 import {
   type Diagnostic,
@@ -54,11 +61,12 @@ import {
   geometricRate,
   stabilityThresholds,
 } from "./diagnostics.js";
+import { type ChainEnd, type Component, type GammaSlot, components, interfaceSlots } from "./junctions.js";
 import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
 import { sharing } from "./pairing.js";
 import { SPOWER_ORDER, type SPowerClothoid } from "./spower_clothoid.js";
 import { MIN_CANONICAL_CHORD, type TransformJacobian, transformJacobian } from "./quadrature.js";
-import { type Chain, chains } from "./topology.js";
+import { type Chain, chains, cutOpen } from "./topology.js";
 
 const TAU = Math.PI * 2.0;
 
@@ -185,11 +193,17 @@ export const defaultSPowerSolverOptions: SPowerSolverOptions = {
 };
 
 export interface SPowerSolverReport extends SolveReport {
-  /** Chains found by {@link chains}, including any that were skipped. */
+  /** Chains found by {@link chains}. */
   chains: number;
 
-  /** Chains skipped for closing on themselves — §5's cut point, deferred to Phase 8. */
-  skippedClosed: number;
+  /**
+   * Chains that closed on themselves and were cut open at `verts[0]` — §5's cut point.
+   *
+   * The cut vertex becomes a junction and its two halves are reconciled through the same
+   * interface machinery as any other node, so a cut chain is solved rather than skipped. What
+   * this counts is how many of {@link chains} had to be treated that way.
+   */
+  cutClosed: number;
 
   /**
    * Interior joints whose G1 row vanished, and which were therefore left unconstrained.
@@ -201,7 +215,7 @@ export interface SPowerSolverReport extends SolveReport {
   /** Largest `|wrapped angle gap|` over every enforced joint, measured after the last step. */
   maxResidual: number;
 
-  /** Gauss-Newton steps actually taken, summed over chains. */
+  /** Gauss-Newton steps actually taken, summed over components. */
   steps: number;
 
   /**
@@ -212,7 +226,7 @@ export interface SPowerSolverReport extends SolveReport {
    */
   degraded: number;
 
-  /** Chain solves run, including the attempts thrown away. `chains − skippedClosed` when nothing broke. */
+  /** Component solves run, including the attempts thrown away. One per component when nothing broke. */
   attempts: number;
 
   /**
@@ -226,29 +240,34 @@ export interface SPowerSolverReport extends SolveReport {
 
 function emptyReport(): SPowerSolverReport {
   return {
-    chains       : 0,
-    skippedClosed: 0,
-    unenforced   : 0,
-    maxResidual  : 0.0,
-    steps        : 0,
-    degraded     : 0,
-    attempts     : 0,
-    seedSteps    : 0,
-    ok           : true,
-    diagnostics  : [],
+    chains     : 0,
+    cutClosed  : 0,
+    unenforced : 0,
+    maxResidual: 0.0,
+    steps      : 0,
+    degraded   : 0,
+    attempts   : 0,
+    seedSteps  : 0,
+    ok         : true,
+    diagnostics: [],
   };
 }
 
 /**
- * What one chain's {@link ChainSystem.run} measured on its way through, for {@link
+ * What one {@link ComponentSystem.run} measured on its way through, for {@link
  * ChainSystem.diagnose} to turn into §8 records.
  *
  * All of it is a byproduct: the history is the convergence test, the backtracks and the
- * relaxation floor are the line search, the refinement residual comes back from `solveKKT`,
+ * relaxation floor are the line search, the refinement residual comes back from the solve,
  * and the multiplier is read off the solution vector. §8's second rule is what makes the
  * unconditional measurement of the first rule affordable.
+ *
+ * It is per *component* and the chains inside one share it, because the quantities are
+ * global to the Newton loop — one line search, one residual history, one factorization
+ * verdict. §8's localization runs the other way: each chain reads the same run and reports
+ * the joints of its own that are answerable for what it says.
  */
-export interface ChainRun {
+export interface ComponentRun {
   steps: number;
   residual: number;
 
@@ -301,6 +320,15 @@ export interface Fault {
   threshold: number;
 }
 
+/**
+ * §8's precedence among the localizable criteria: cause before symptom.
+ *
+ * {@link ChainSystem.faults} emits in this order already; the constant exists so the same
+ * order can be re-imposed after faults from several chains of a component are merged, where
+ * concatenation would otherwise let one chain's symptom outrank another chain's cause.
+ */
+const FAULT_ORDER: DiagnosticCondition[] = ["g1-rank-deficiency", "chord-degeneracy", "newton-not-converging"];
+
 /** `Rᵥ` for every vertex, from chord lengths only — §3, and §5's note that `Rᵥ` is shared. */
 export function referenceLengths(mesh: SolvableMesh) {
   const refs = new Map<SolvableVertex, number>();
@@ -320,16 +348,18 @@ export function referenceLengths(mesh: SolvableMesh) {
 }
 
 /**
- * Which of an edge's two ends the frozen G1 row can see, and with what sign.
+ * Whether the given end of an edge is the edge's *own* far end, `u = 1`.
  *
  * The chain-direction tangent angle at an end is `θ_e(u) + (edge runs backwards ? π : 0)`,
- * and `θ_e(u) = ∫₀^u q + KTH_e`. Freezing `KTH_e` leaves the turning integral, which is only
- * nonzero at `u = 1` — the edge's own far end. So an edge enters the row exactly when the
- * joint sits at its `v2`-side in chain order, which for the arriving edge means it runs
- * forwards and for the leaving edge means it runs backwards.
+ * and `θ_e(u) = ∫₀^u q + KTH_e`. The turning integral is nonzero only at `u = 1`, so this is
+ * exactly the test for whether an end's angle carries the edge's total turning — and, with
+ * the Jacobian frozen, whether it enters the G1 row at all.
+ *
+ * `later` means the end at the higher chain index: the `v2`-side when the edge runs forwards
+ * along the chain, the `v1`-side when it runs backwards.
  */
-function seesTurning(frame: EdgeFrame, arriving: boolean) {
-  return arriving === frame.forward;
+function seesTurning(frame: EdgeFrame, later: boolean) {
+  return later === frame.forward;
 }
 
 /**
@@ -365,6 +395,28 @@ export class ChainSystem {
 
   /** Index of the multiplier at `verts[i]`, or `-1` where there is no enforced joint. */
   lambdaAt: Int32Array;
+
+  /**
+   * Interface index of each local unknown, or `-1` where the unknown is private — §5.
+   *
+   * Set by {@link ComponentSystem}, and all `-1` until one claims this chain. Nothing else in
+   * this class reads it: the layout, the band and the assembly are the same whether or not a
+   * chain is coupled to another, and the split into `A_i`, `B_i` and `D` happens where the
+   * matrix is *read*. That is what makes general valence a decomposition rather than a
+   * change of representation.
+   */
+  localToGlobal: Int32Array;
+
+  /**
+   * `±1` relating each mirrored unknown to the interface value it mirrors — see
+   * {@link ComponentSystem.orientation}.
+   *
+   * A block is written in the direction the *chain* travels through its vertex, and two chains
+   * meeting at a node need not travel the same way through it. Identification across the
+   * interface is therefore `z_local = σ · γ`, not `z_local = γ`, and `1` everywhere is what a
+   * chain-interior joint gets by construction.
+   */
+  localSign: Float64Array;
 
   rows: number[] = [];
   n = 0;
@@ -453,6 +505,8 @@ export class ChainSystem {
     this.layout();
 
     this.z = new Float64Array(this.n);
+    this.localToGlobal = new Int32Array(this.n).fill(-1);
+    this.localSign = new Float64Array(this.n).fill(1.0);
     this.kkt = new BandedSymmetric(this.n, this.bandwidth());
 
     this.turning = new Float64Array(edges.length);
@@ -579,6 +633,49 @@ export class ChainSystem {
   }
 
   /**
+   * The vertex, edge and block slot at one of the chain's two ends — `0` for `verts[0]`, `1`
+   * for the last vertex, matching {@link ChainEnd.end}.
+   *
+   * A chain end is never a split vertex, since only interior joints have two edge-ends to
+   * split between, so {@link slot} agrees with itself there whichever way it is asked.
+   */
+  endVertex(end: 0 | 1) {
+    return end === 1 ? this.frames.length : 0;
+  }
+
+  endEdge(end: 0 | 1) {
+    return end === 1 ? this.frames.length - 1 : 0;
+  }
+
+  endSlot(end: 0 | 1, n: number) {
+    return this.slot(this.endVertex(end), n, end === 1);
+  }
+
+  /**
+   * Chain-direction tangent angle at one end of edge `e`.
+   *
+   * `θ_e(u) + (edge runs backwards ? π : 0)`, evaluated at whichever of `u = 0, 1` this end
+   * is — see {@link seesTurning} for which that is.
+   */
+  endAngle(e: number, later: boolean) {
+    const base = this.angle[e] + (seesTurning(this.frames[e], later) ? this.turning[e] : 0.0);
+
+    return this.frames[e].forward ? base : base + Math.PI;
+  }
+
+  /**
+   * The direction the curve leaves a vertex in, along edge `e`.
+   *
+   * {@link endAngle} points along the chain, so at the `later` end it points *into* the
+   * vertex and has to be reversed. Two edge-ends are G1-continuous exactly when their
+   * outgoing directions are antiparallel, which is the one form that says the same thing at a
+   * chain joint and at a junction of any valence: there is no "arriving" edge at a node.
+   */
+  outgoing(e: number, later: boolean) {
+    return this.endAngle(e, later) + (later ? Math.PI : 0.0);
+  }
+
+  /**
    * Take this system's starting point from a converged solve one order below — §9's rung.
    *
    * Three things move across. The entries both orders have mean the same thing at every order
@@ -689,11 +786,7 @@ export class ChainSystem {
         continue;
       }
 
-      const incoming = frames[i - 1].forward ? this.turning[i - 1] + this.angle[i - 1] : this.angle[i - 1] + Math.PI;
-
-      const outgoing = frames[i].forward ? this.angle[i] : this.turning[i] + this.angle[i] + Math.PI;
-
-      this.residuals[i] = wrapAngle(outgoing - incoming);
+      this.residuals[i] = wrapAngle(this.endAngle(i, false) - this.endAngle(i - 1, true));
       worst = Math.max(worst, Math.abs(this.residuals[i]));
     }
 
@@ -761,212 +854,70 @@ export class ChainSystem {
    * measuring the wrong thing. One code path, summed first, keeps them the same object.
    */
   g1Row(i: number) {
-    const { p, block, frames } = this;
-    const dof = this.options.dof;
-    const frozen = this.options.jacobian === "frozen";
     const row = this.g1;
 
     row.clear();
 
+    const add = (column: number, value: number) => {
+      row.set(column, (row.get(column) ?? 0.0) + value);
+    };
+
     // The arriving edge enters negatively, the leaving edge positively — as in `measure`.
-    for (const arriving of [true, false]) {
-      const edge = arriving ? i - 1 : i;
-      const frame = frames[edge];
-      const sign = arriving ? -1.0 : 1.0;
-      const far = seesTurning(frame, arriving);
-
-      let entries: Float64Array;
-
-      if (frozen) {
-        if (!far) {
-          continue;
-        }
-
-        entries = dof.turningRow(p, frame);
-      } else {
-        const w = this.weights;
-
-        w.set(this.jacobians[edge].dKth);
-
-        if (far) {
-          const turning = dof.turningWeights(p);
-
-          for (let c = 0; c < w.length; c++) {
-            w[c] += turning[c];
-          }
-        }
-
-        entries = dof.pullback(p, frame, w);
-      }
-
-      for (let k = 0; k < 2 * block; k++) {
-        const column = this.at(edge, k);
-
-        row.set(column, (row.get(column) ?? 0.0) + sign * entries[k]);
-      }
-    }
+    this.endRow(i - 1, true, -1.0, add);
+    this.endRow(i, false, 1.0, add);
 
     return row;
   }
 
   /**
-   * Run the outer iteration. Returns the steps taken, the final residual, and whether every
-   * factorization held.
+   * `sign · ∂(endAngle(e, later))/∂x`, emitted one local column at a time.
    *
-   * Each pass writes the DOF out, measures the geometry they produced, then linearizes about
-   * *that* state — so the transform used to build the coefficients and the transform used to
-   * build `H` are the same one. The arclength estimate only moves at the end of a pass,
-   * which is what makes `L_e` an outer-iteration quantity rather than a circular one.
+   * A column at a time rather than into a row object, because a *node* row spans edge-ends in
+   * different chains and there is no one local index space to write it into: the caller routes
+   * each column to wherever that unknown lives. {@link g1Row} is the two-call chain case.
    *
-   * Steps are accepted by a backtracking search on §5's `ℓ1` merit
-   *
-   * ```
-   *   ϕ(z) = ½ zᵀHz + μ·Σ|c_i(z)| ,       μ > max|λ|
-   * ```
-   *
-   * which is the standard exact penalty for an equality-constrained minimization: with `μ`
-   * above the multipliers the Newton direction is a descent direction for it, and a solution
-   * of the original problem is a local minimum of it. `H` is held at the linearization point
-   * for the duration of one search — only `c` is remeasured, on the actual curves — so the
-   * comparison is between two states of the same model.
+   * `∂KTH/∂a` is what the frozen version throws away, and it is the larger of the two terms.
+   * `L_e` still lags: it enters only through `M_e`, so the transform used here is the one the
+   * coefficients were built with, refreshed between passes. See §14.
    */
-  run(): ChainRun {
-    const opts = this.options;
-    const grad = new Float64Array(this.n);
-    const rhs = new Float64Array(this.n);
-    const base = new Float64Array(this.n);
+  endRow(e: number, later: boolean, sign: number, emit: (column: number, value: number) => void) {
+    const { p, block, frames } = this;
+    const dof = this.options.dof;
+    const frame = frames[e];
+    const far = seesTurning(frame, later);
 
-    const history: number[] = [];
-    const trace = opts.trace ? ([] as TraceStep[]) : undefined;
+    let entries: Float64Array;
 
-    let steps = 0;
-    let factored = true;
-    let mu = 1.0;
-
-    let backtracks = 0;
-    let starved = false;
-    let refinement = 0.0;
-    let multiplier = 0.0;
-
-    this.write();
-
-    let residual = this.measure();
-
-    for (let iter = 0; ; iter++) {
-      if (iter >= opts.iterations || residual < opts.tolerance || this.rows.length === 0) {
-        break;
+    if (this.options.jacobian === "frozen") {
+      if (!far) {
+        return;
       }
 
-      this.assemble();
-      this.kkt.apply(this.z, grad);
+      entries = dof.turningRow(p, frame);
+    } else {
+      const w = this.weights;
 
-      for (let i = 0; i < this.n; i++) {
-        rhs[i] = -grad[i];
-      }
+      w.set(this.jacobians[e].dKth);
 
-      for (let i = 1; i < this.frames.length; i++) {
-        if (this.lambdaAt[i] >= 0) {
-          rhs[this.lambdaAt[i]] = -this.residuals[i];
+      if (far) {
+        const turning = dof.turningWeights(p);
+
+        for (let c = 0; c < w.length; c++) {
+          w[c] += turning[c];
         }
       }
 
-      const step = solveKKT(this.kkt, rhs, this.rows, opts.kkt);
-
-      refinement = Math.max(refinement, step.residual);
-
-      if (!step.ok) {
-        factored = false;
-        break;
-      }
-
-      for (const row of this.rows) {
-        mu = Math.max(mu, 2.0 * Math.abs(this.z[row] + step.x[row]));
-      }
-
-      base.set(this.z);
-
-      const start = this.merit(mu);
-      let t = opts.relaxation;
-      let cuts = 0;
-
-      for (;;) {
-        for (let i = 0; i < this.n; i++) {
-          this.z[i] = base[i] + t * step.x[i];
-        }
-
-        this.write();
-        this.measure();
-
-        if (this.merit(mu) < start) {
-          break;
-        }
-
-        // Out of room rather than out of patience: the direction was not a descent one.
-        if (t < MIN_RELAXATION) {
-          starved = true;
-          break;
-        }
-
-        t *= SHRINK;
-        cuts++;
-      }
-
-      backtracks = Math.max(backtracks, cuts);
-
-      // `L_e` only moves here, between passes — the coefficients are rebuilt through the
-      // updated `M_e` so the next linearization point is a self-consistent one.
-      for (let i = 0; i < this.frames.length; i++) {
-        this.frames[i].arclength = this.arclength[i];
-      }
-
-      this.write();
-      residual = this.measure();
-
-      steps++;
-
-      const largest = this.largestMultiplier();
-
-      multiplier = Math.max(multiplier, largest);
-
-      if (history.length >= RATE_WINDOW) {
-        history.shift();
-      }
-
-      history.push(residual);
-
-      trace?.push({
-        merit: this.merit(mu),
-        residual,
-        stepNorm     : t * infinityNorm(step.x),
-        maxMultiplier: largest,
-        relaxation   : t,
-        refinement   : step.residual,
-      });
+      entries = dof.pullback(p, frame, w);
     }
 
-    return {
-      steps,
-      residual,
-      factored,
-      ok: factored && Number.isFinite(residual),
-      history,
-      backtracks,
-      starved,
-      refinement,
-      multiplier,
-      trace,
-    };
+    for (let k = 0; k < 2 * block; k++) {
+      emit(this.at(e, k), sign * entries[k]);
+    }
   }
 
-  /** `max|λ_v|` over the chain's enforced joints, read off the current solution vector. */
-  largestMultiplier() {
-    let worst = 0.0;
-
-    for (const row of this.rows) {
-      worst = Math.max(worst, Math.abs(this.z[row]));
-    }
-
-    return worst;
+  /** Solve this chain on its own. Shorthand for a {@link ComponentSystem} with no interface. */
+  run(): ComponentRun {
+    return new ComponentSystem([this], []).run();
   }
 
   /**
@@ -1015,7 +966,7 @@ export class ChainSystem {
    * joint makes the iteration diverge, and lowering the joint the *divergence* pointed at
    * would be treating the second reading.
    */
-  faults(run: ChainRun, broken?: Map<SolvableVertex, number>): Fault[] {
+  faults(run: ComponentRun, broken?: Map<SolvableVertex, number>): Fault[] {
     const limits = stabilityThresholds;
     const { verts } = this.chain;
     const found: Fault[] = [];
@@ -1119,33 +1070,11 @@ export class ChainSystem {
    * {@link SPowerSolver.solve}, which is the only thing that knows an attempt was one of
    * several.
    */
-  diagnose(chain: number, run: ChainRun, into: Diagnostic[]) {
+  diagnose(chain: number, run: ComponentRun, into: Diagnostic[]) {
     const limits = diagnosticThresholds;
     const opts = this.options;
 
-    for (let i = 0; i < this.curves.length; i++) {
-      const measured = this.curves[i].canonical;
-
-      // `|C(1)| ≤ 1` exactly, the canonical curve having unit arclength. Above it — or not a
-      // number at all — is the quadrature having lost the curve, which is the same fault
-      // arriving from the other side and is worth catching in the same place.
-      const lost = !(measured <= 1.0);
-
-      if (!lost && measured >= limits.chordDegeneracy) {
-        continue;
-      }
-
-      into.push({
-        condition: "chord-degeneracy",
-        severity : lost || measured <= MIN_CANONICAL_CHORD ? "error" : "warning",
-        action   : "none",
-        chain,
-        at  : i,
-        edge: this.chain.edges[i],
-        measured,
-        threshold: limits.chordDegeneracy,
-      });
-    }
+    this.chordDiagnostics(chain, into);
 
     if (!run.factored) {
       const delta = opts.kkt.delta ?? defaultKKTSolveOptions.delta;
@@ -1209,6 +1138,51 @@ export class ChainSystem {
   }
 
   /**
+   * The half of {@link diagnose} that is about this chain rather than about the run.
+   *
+   * A component's chains share one Newton loop, so the run-level records — the factorization,
+   * the rate, the line search — are one event and are reported once, against the component's
+   * first chain. These are per-chain measurements and are reported for every chain.
+   */
+  localDiagnostics(chain: number, into: Diagnostic[]) {
+    this.chordDiagnostics(chain, into);
+    this.multipliers(chain, into);
+
+    return into;
+  }
+
+  /** Edges whose canonical chord has collapsed, or which the quadrature has lost outright. */
+  chordDiagnostics(chain: number, into: Diagnostic[]) {
+    const limits = diagnosticThresholds;
+
+    for (let i = 0; i < this.curves.length; i++) {
+      const measured = this.curves[i].canonical;
+
+      // `|C(1)| ≤ 1` exactly, the canonical curve having unit arclength. Above it — or not a
+      // number at all — is the quadrature having lost the curve, which is the same fault
+      // arriving from the other side and is worth catching in the same place.
+      const lost = !(measured <= 1.0);
+
+      if (!lost && measured >= limits.chordDegeneracy) {
+        continue;
+      }
+
+      into.push({
+        condition: "chord-degeneracy",
+        severity : lost || measured <= MIN_CANONICAL_CHORD ? "error" : "warning",
+        action   : "none",
+        chain,
+        at  : i,
+        edge: this.chain.edges[i],
+        measured,
+        threshold: limits.chordDegeneracy,
+      });
+    }
+
+    return into;
+  }
+
+  /**
    * Joints whose multiplier stands out from the chain's — §8's corner evidence, for a client.
    *
    * `|λ_v|` is the cost of holding the joint tangent, in the units of the energy, so what it
@@ -1258,14 +1232,14 @@ export class ChainSystem {
   }
 
   /**
-   * `½zᵀHz + μ·Σ|c_i|`, using the element Hessians as of the last {@link assemble}.
+   * `zᵀHz`, using the element Hessians as of the last {@link assemble}.
    *
    * Reading `H` from the cached elements rather than from the band keeps the multiplier slots
    * out of it — `kkt.apply` would fold `Jᵀλ` into the same numbers.
    */
-  merit(mu: number) {
+  energy() {
     const d = 2 * this.block;
-    let energy = 0.0;
+    let total = 0.0;
 
     for (let e = 0; e < this.elements.length; e++) {
       const h = this.elements[e];
@@ -1274,18 +1248,23 @@ export class ChainSystem {
         const zr = this.z[this.at(e, r)];
 
         for (let c = 0; c < d; c++) {
-          energy += h[r * d + c] * zr * this.z[this.at(e, c)];
+          total += h[r * d + c] * zr * this.z[this.at(e, c)];
         }
       }
     }
 
-    let infeasible = 0.0;
+    return total;
+  }
+
+  /** `Σ|c_i|` over this chain's interior joints. */
+  infeasibility() {
+    let total = 0.0;
 
     for (let i = 1; i < this.frames.length; i++) {
-      infeasible += Math.abs(this.residuals[i]);
+      total += Math.abs(this.residuals[i]);
     }
 
-    return 0.5 * energy + mu * infeasible;
+    return total;
   }
 
   /**
@@ -1308,12 +1287,834 @@ export class ChainSystem {
 }
 
 /**
+ * Several chains solved as one system, coupled only through the node DOF they share — §5's
+ * substructuring, and the whole of Phase 8.
+ *
+ * ## The split
+ *
+ * Order the unknowns as every chain's private DOF followed by the interface `γ`, and the
+ * global KKT matrix is
+ *
+ * ```
+ *   ⎡ A₁        B₁ ⎤        A_i  chain `i`'s band, on its interior unknowns only
+ *   ⎢    A₂     B₂ ⎥        B_i  what chain `i` contributes to the interface
+ *   ⎢       ⋱   ⋮  ⎥        D    the interface's own block, summed over chains
+ *   ⎣ B₁ᵀ B₂ᵀ ⋯ D  ⎦             plus the node G1 rows
+ * ```
+ *
+ * with `S = D − Σ B_iᵀ A_i⁻¹ B_i` the Schur complement, solved densely. `A_i` is still banded
+ * and still quasi-definite: a principal submatrix taken in increasing index order has
+ * `|pos(a) − pos(b)| ≤ |a − b|`, so it inherits the chain's bandwidth, and a principal
+ * submatrix of an SPD (1,1) block is SPD while every chain-interior multiplier row stays a
+ * multiplier row. So the expensive half is unchanged and `math/banded.ts` still applies to it;
+ * only `S` needs a general method, and `S` is `O(#shared groups × (p+1))` on a side.
+ *
+ * ## What lands in `γ`
+ *
+ * Both of §5's coupling caveats, which `junctions.ts` derives: a block entry two or more
+ * edge-ends read out of the same DOF, *and* a node G1 row's multiplier. The second is easy to
+ * forget because it shares no block — a G1-only junction couples its chains through a single
+ * row and nothing else — and forgetting it is silent.
+ *
+ * A node row's multiplier has to be an interface unknown even though a chain-interior one need
+ * not be: it touches the far block of each incident edge, which is interior to a *different*
+ * chain, so there is no chain whose band could hold it.
+ *
+ * ## What does not change
+ *
+ * The chains keep the layout, band, assembly and DOF numbering they had in Phase 2. An
+ * interface unknown is an ordinary local slot in every chain that reads it, mirrored between
+ * them by {@link sync}; {@link ChainSystem.localToGlobal} is the only new state, and it is
+ * read only here. With an empty interface — one chain, or a mesh whose junctions are all
+ * fully split, which §3's default at valence ≥ 3 makes the common case — the Schur complement
+ * is `0 × 0` and the step reduces to exactly the single banded solve it always was.
+ */
+export class ComponentSystem {
+  options: SPowerSolverOptions;
+
+  /** Global index of each local unknown that is private, `-1` for the interface ones. */
+  interior: Int32Array[] = [];
+
+  /** Where each chain's private unknowns start in the global vector, and how many there are. */
+  offsets: number[] = [];
+  counts: number[] = [];
+
+  /** First global index of the interface block, and the total unknown count. */
+  gammaAt = 0;
+  n = 0;
+
+  /** Current global state — chain-private unknowns then `γ`. Mirrored into the chains by {@link take}. */
+  z: Float64Array;
+
+  /** Interface values, and the `γ` part of {@link z}. */
+  zGamma: Float64Array;
+
+  /** Global index of every multiplier: each chain's, renumbered, then the node rows'. */
+  multiplierRows: number[] = [];
+
+  /** Node G1 gaps as of the last {@link measure}, indexed by `γ` slot. `0` at an entry slot. */
+  nodeResiduals: Float64Array;
+
+  /** `A_i`, `B_i` row-major `counts[i] × γ`, and the dense `D`. */
+  blocks: BandedSymmetric[] = [];
+  coupling: Float64Array[] = [];
+  d: Float64Array;
+
+  /** The Schur complement, its factorization, and `A_i⁻¹B_i` per chain. */
+  schur: Float64Array;
+  lu?: DenseLU;
+  ys: Float64Array[] = [];
+
+  private factors: KKTFactorization[] = [];
+  private rowsOf: number[][] = [];
+  private solution: Float64Array[] = [];
+  private column: Float64Array[] = [];
+  private reduced: Float64Array;
+  private work: Float64Array;
+  private correction: Float64Array;
+
+  constructor(
+    public systems: ChainSystem[],
+    public gamma: GammaSlot[]
+  ) {
+    this.options = systems[0].options;
+
+    for (const s of systems) {
+      s.localToGlobal.fill(-1);
+      s.localSign.fill(1.0);
+    }
+
+    for (let g = 0; g < gamma.length; g++) {
+      const slot = gamma[g];
+
+      if (slot.kind !== "entry") {
+        continue;
+      }
+
+      for (const end of slot.ends) {
+        const s = systems[end.chain];
+        const at = s.endSlot(end.end, slot.order);
+
+        s.localToGlobal[at] = g;
+        s.localSign[at] = ComponentSystem.orientation(end, slot.order);
+      }
+    }
+
+    const m = gamma.length;
+    let at = 0;
+
+    for (const s of systems) {
+      const map = new Int32Array(s.n).fill(-1);
+      let count = 0;
+
+      for (let i = 0; i < s.n; i++) {
+        if (s.localToGlobal[i] < 0) {
+          map[i] = count++;
+        }
+      }
+
+      this.interior.push(map);
+      this.offsets.push(at);
+      this.counts.push(count);
+      this.rowsOf.push(s.rows.map((row) => map[row]));
+
+      for (const row of s.rows) {
+        this.multiplierRows.push(at + map[row]);
+      }
+
+      this.blocks.push(new BandedSymmetric(count, Math.min(s.kkt.bandwidth, Math.max(0, count - 1))));
+      this.coupling.push(new Float64Array(count * m));
+      this.ys.push(new Float64Array(count * m));
+      this.solution.push(new Float64Array(count));
+      this.column.push(new Float64Array(count));
+
+      at += count;
+    }
+
+    this.gammaAt = at;
+    this.n = at + m;
+
+    for (let g = 0; g < m; g++) {
+      if (gamma[g].kind === "row") {
+        this.multiplierRows.push(at + g);
+      }
+    }
+
+    this.z = new Float64Array(this.n);
+    this.zGamma = new Float64Array(m);
+    this.nodeResiduals = new Float64Array(m);
+    this.d = new Float64Array(m * m);
+    this.schur = new Float64Array(m * m);
+    this.reduced = new Float64Array(m);
+    this.work = new Float64Array(this.n);
+    this.correction = new Float64Array(this.n);
+  }
+
+  /**
+   * The sign relating entry `order` at `end` to the interface value it mirrors — §5's
+   * orientation, the caveat `transformEntry` handles inside a chain.
+   *
+   * A vertex block holds `Rᵥⁿ/n! · dⁿκ/dsⁿ` measured along the direction the chain travels
+   * *through* the vertex. Reverse that direction and `κ` flips sign while `d/ds` flips too, so
+   * entry `n` picks up `(−1)^{n+1}` and the odd entries come through unchanged. Which ends are
+   * reversed is {@link ChainEnd.reversed}, decided per group in `junctions.ts`.
+   *
+   * Getting this wrong is quiet: the tangent row still closes, because it carries its own `π`,
+   * and the solve still converges — onto `κ_a = −κ_b`, a curvature *jump* twice the size of the
+   * one the pairing asked to remove.
+   */
+  static orientation(end: ChainEnd, order: number) {
+    return end.reversed && (order & 1) === 0 ? -1.0 : 1.0;
+  }
+
+  /** The chain system, edge and end-orientation a {@link ChainEnd} names. */
+  endOf(end: ChainEnd) {
+    const s = this.systems[end.chain];
+
+    return { system: s, edge: s.endEdge(end.end), later: end.end === 1 };
+  }
+
+  /** Push every interface value out to the chain-local slots that mirror it. */
+  sync() {
+    for (const s of this.systems) {
+      for (let i = 0; i < s.n; i++) {
+        const g = s.localToGlobal[i];
+
+        if (g >= 0) {
+          s.z[i] = s.localSign[i] * this.zGamma[g];
+        }
+      }
+    }
+  }
+
+  /**
+   * Take the interface values *from* the chains, averaging where they disagree, then mirror
+   * the result back.
+   *
+   * Disagreement is not an error state: §9's continuation seeds each chain separately and the
+   * two ends at a junction land on different numbers for the same shared entry, exactly as the
+   * two edges at a joint do within one chain. Averaging is what {@link ChainSystem.seedFrom}
+   * already does about it, for the same reason and by the same argument.
+   */
+  gather() {
+    const counts = new Float64Array(this.gamma.length);
+
+    this.zGamma.fill(0.0);
+
+    for (const s of this.systems) {
+      for (let i = 0; i < s.n; i++) {
+        const g = s.localToGlobal[i];
+
+        if (g >= 0) {
+          this.zGamma[g] += s.localSign[i] * s.z[i];
+          counts[g]++;
+        }
+      }
+    }
+
+    for (let g = 0; g < counts.length; g++) {
+      if (counts[g] > 1) {
+        this.zGamma[g] /= counts[g];
+      }
+    }
+
+    this.sync();
+    this.read(this.z);
+  }
+
+  /** Collect the current state into a global vector. */
+  read(out: Float64Array) {
+    for (let c = 0; c < this.systems.length; c++) {
+      const s = this.systems[c];
+      const map = this.interior[c];
+      const off = this.offsets[c];
+
+      for (let i = 0; i < s.n; i++) {
+        if (map[i] >= 0) {
+          out[off + map[i]] = s.z[i];
+        }
+      }
+    }
+
+    out.set(this.zGamma, this.gammaAt);
+
+    return out;
+  }
+
+  /** Distribute a global vector back into the chains and the interface. */
+  take(x: Float64Array) {
+    for (let c = 0; c < this.systems.length; c++) {
+      const s = this.systems[c];
+      const map = this.interior[c];
+      const off = this.offsets[c];
+
+      for (let i = 0; i < s.n; i++) {
+        if (map[i] >= 0) {
+          s.z[i] = x[off + map[i]];
+        }
+      }
+    }
+
+    for (let g = 0; g < this.zGamma.length; g++) {
+      this.zGamma[g] = x[this.gammaAt + g];
+    }
+
+    this.sync();
+  }
+
+  write() {
+    for (const s of this.systems) {
+      s.write();
+    }
+  }
+
+  /**
+   * Measure every chain's joints and every node's, and return the worst gap.
+   *
+   * A node gap is `wrap(outgoing(a) − outgoing(b) − π)`, which is the same quantity a chain
+   * joint measures — see {@link ChainSystem.outgoing} — written without reference to which
+   * edge arrives and which leaves, since at a node neither does.
+   */
+  measure() {
+    let worst = 0.0;
+
+    for (const s of this.systems) {
+      worst = Math.max(worst, s.measure());
+    }
+
+    for (let g = 0; g < this.gamma.length; g++) {
+      const slot = this.gamma[g];
+
+      if (slot.kind !== "row") {
+        this.nodeResiduals[g] = 0.0;
+        continue;
+      }
+
+      const a = this.endOf(slot.a);
+      const b = this.endOf(slot.b);
+
+      const gap = wrapAngle(a.system.outgoing(a.edge, a.later) - b.system.outgoing(b.edge, b.later) - Math.PI);
+
+      this.nodeResiduals[g] = gap;
+      worst = Math.max(worst, Math.abs(gap));
+    }
+
+    return worst;
+  }
+
+  /** `½zᵀHz + μ·Σ|c_i|` over the whole component — §5's `ℓ1` merit, summed. */
+  merit(mu: number) {
+    let energy = 0.0;
+    let infeasible = 0.0;
+
+    for (const s of this.systems) {
+      energy += s.energy();
+      infeasible += s.infeasibility();
+    }
+
+    for (const gap of this.nodeResiduals) {
+      infeasible += Math.abs(gap);
+    }
+
+    return 0.5 * energy + mu * infeasible;
+  }
+
+  /** `max|λ|` over every multiplier in the component, chain-interior and node alike. */
+  largestMultiplier() {
+    let worst = 0.0;
+
+    for (const row of this.multiplierRows) {
+      worst = Math.max(worst, Math.abs(this.z[row]));
+    }
+
+    return worst;
+  }
+
+  /**
+   * Assemble each chain, then split its band into `A_i`, `B_i` and `D`, and add the node rows.
+   *
+   * The split is by lookup rather than by re-derivation: a chain assembles into its own local
+   * numbering exactly as before and every entry is then routed by {@link
+   * ChainSystem.localToGlobal}. Two ends reading the same interface DOF therefore *sum* into
+   * the same row and column of `D`, which is what identifying two variables means.
+   */
+  build() {
+    const m = this.gamma.length;
+
+    this.d.fill(0.0);
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const s = this.systems[c];
+
+      s.assemble();
+
+      const a = this.blocks[c].zero();
+      const b = this.coupling[c].fill(0.0);
+      const map = this.interior[c];
+      const bw = s.kkt.bandwidth;
+
+      for (let j = 0; j < s.n; j++) {
+        const hi = Math.min(s.n - 1, j + bw);
+
+        for (let i = j; i <= hi; i++) {
+          const v = s.kkt.get(i, j);
+
+          if (v === 0.0) {
+            continue;
+          }
+
+          const gi = s.localToGlobal[i];
+          const gj = s.localToGlobal[j];
+
+          if (gi < 0 && gj < 0) {
+            a.add(map[i], map[j], v);
+          } else if (gi < 0) {
+            b[map[i] * m + gj] += s.localSign[j] * v;
+          } else if (gj < 0) {
+            b[map[j] * m + gi] += s.localSign[i] * v;
+          } else {
+            const both = s.localSign[i] * s.localSign[j] * v;
+
+            this.d[gi * m + gj] += both;
+
+            if (i !== j) {
+              this.d[gj * m + gi] += both;
+            }
+          }
+        }
+      }
+    }
+
+    for (let g = 0; g < m; g++) {
+      const slot = this.gamma[g];
+
+      if (slot.kind === "row") {
+        this.nodeRow(g, slot.a, 1.0);
+        this.nodeRow(g, slot.b, -1.0);
+      }
+    }
+  }
+
+  /** Scatter one end's contribution to node row `g`, by where each column's unknown lives. */
+  nodeRow(g: number, at: ChainEnd, sign: number) {
+    const m = this.gamma.length;
+    const { system, edge, later } = this.endOf(at);
+    const map = this.interior[at.chain];
+    const b = this.coupling[at.chain];
+
+    system.endRow(edge, later, sign, (column, value) => {
+      const local = system.localToGlobal[column];
+
+      if (local < 0) {
+        b[map[column] * m + g] += value;
+      } else {
+        const mirrored = system.localSign[column] * value;
+
+        this.d[local * m + g] += mirrored;
+        this.d[g * m + local] += mirrored;
+      }
+    });
+  }
+
+  /** `out = K x` for the assembled global matrix — what the global refinement measures against. */
+  applyGlobal(x: Float64Array, out: Float64Array) {
+    const m = this.gamma.length;
+
+    out.fill(0.0);
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const off = this.offsets[c];
+      const k = this.counts[c];
+      const b = this.coupling[c];
+      const xi = x.subarray(off, off + k);
+      const ai = this.solution[c];
+
+      this.blocks[c].apply(xi, ai);
+
+      for (let i = 0; i < k; i++) {
+        out[off + i] += ai[i];
+
+        const row = i * m;
+
+        for (let g = 0; g < m; g++) {
+          const v = b[row + g];
+
+          if (v !== 0.0) {
+            out[off + i] += v * x[this.gammaAt + g];
+            out[this.gammaAt + g] += v * xi[i];
+          }
+        }
+      }
+    }
+
+    for (let r = 0; r < m; r++) {
+      let sum = 0.0;
+
+      for (let c = 0; c < m; c++) {
+        sum += this.d[r * m + c] * x[this.gammaAt + c];
+      }
+
+      out[this.gammaAt + r] += sum;
+    }
+
+    return out;
+  }
+
+  /** Factor every `A_i`, then form and factor `S`. False if any factorization underflowed. */
+  factor() {
+    const m = this.gamma.length;
+
+    this.factors.length = 0;
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const f = new KKTFactorization(this.blocks[c], this.rowsOf[c], this.options.kkt);
+
+      if (!f.ok) {
+        return false;
+      }
+
+      this.factors.push(f);
+    }
+
+    if (m === 0) {
+      return true;
+    }
+
+    this.schur.set(this.d);
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const k = this.counts[c];
+      const b = this.coupling[c];
+      const y = this.ys[c];
+      const col = this.column[c];
+      const sol = this.solution[c];
+
+      for (let g = 0; g < m; g++) {
+        for (let i = 0; i < k; i++) {
+          col[i] = b[i * m + g];
+        }
+
+        this.factors[c].solve(col, sol);
+
+        for (let i = 0; i < k; i++) {
+          y[i * m + g] = sol[i];
+        }
+      }
+
+      for (let r = 0; r < m; r++) {
+        for (let cc = 0; cc < m; cc++) {
+          let sum = 0.0;
+
+          for (let i = 0; i < k; i++) {
+            sum += b[i * m + r] * y[i * m + cc];
+          }
+
+          this.schur[r * m + cc] -= sum;
+        }
+      }
+    }
+
+    this.lu = new DenseLU(this.schur, m);
+
+    return this.lu.ok;
+  }
+
+  /** One pass of the substructured solve, against the factorization {@link factor} left behind. */
+  solveOnce(b: Float64Array, out: Float64Array) {
+    const m = this.gamma.length;
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const off = this.offsets[c];
+      const k = this.counts[c];
+
+      this.factors[c].solve(b.subarray(off, off + k), this.solution[c]);
+      out.set(this.solution[c], off);
+    }
+
+    if (m === 0) {
+      return;
+    }
+
+    const rs = this.reduced;
+
+    for (let g = 0; g < m; g++) {
+      rs[g] = b[this.gammaAt + g];
+    }
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const off = this.offsets[c];
+      const k = this.counts[c];
+      const bc = this.coupling[c];
+
+      for (let i = 0; i < k; i++) {
+        const xi = out[off + i];
+
+        for (let g = 0; g < m; g++) {
+          rs[g] -= bc[i * m + g] * xi;
+        }
+      }
+    }
+
+    this.lu?.solveInPlace(rs);
+
+    for (let g = 0; g < m; g++) {
+      out[this.gammaAt + g] = rs[g];
+    }
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const off = this.offsets[c];
+      const k = this.counts[c];
+      const y = this.ys[c];
+
+      for (let i = 0; i < k; i++) {
+        let sum = 0.0;
+
+        for (let g = 0; g < m; g++) {
+          sum += y[i * m + g] * rs[g];
+        }
+
+        out[off + i] -= sum;
+      }
+    }
+  }
+
+  /**
+   * Solve the global step, refining against the assembled matrix.
+   *
+   * With no interface this is `solveKKT` on the one chain, down to the object doing the
+   * factoring, so a single chain takes the Phase 2 path and reports the Phase 2 refinement
+   * residual — in equilibrated units, as {@link KKTSolveResult.residual} always is. The
+   * substructured path cannot report those units, having several equilibrations and a dense
+   * complement between it and the answer, so its residual is the plain `‖Kx − b‖∞`.
+   */
+  solve(b: Float64Array, out: Float64Array) {
+    if (!this.factor()) {
+      out.fill(0.0);
+
+      return { residual: Infinity, ok: false };
+    }
+
+    if (this.gamma.length === 0) {
+      return { residual: this.factors[0].solve(b, out).residual, ok: true };
+    }
+
+    const opts = { ...defaultKKTSolveOptions, ...this.options.kkt };
+
+    this.solveOnce(b, out);
+
+    let residual = Infinity;
+
+    for (let pass = 0; pass <= opts.refinement; pass++) {
+      this.applyGlobal(out, this.work);
+
+      residual = 0.0;
+
+      for (let i = 0; i < this.n; i++) {
+        this.work[i] = b[i] - this.work[i];
+        residual = Math.max(residual, Math.abs(this.work[i]));
+      }
+
+      if (pass === opts.refinement) {
+        break;
+      }
+
+      this.solveOnce(this.work, this.correction);
+
+      for (let i = 0; i < this.n; i++) {
+        out[i] += this.correction[i];
+      }
+    }
+
+    return { residual, ok: true };
+  }
+
+  /** `−(Kz)` with the multiplier rows replaced by `−c` — the Newton right-hand side. */
+  gradient(rhs: Float64Array) {
+    this.applyGlobal(this.z, rhs);
+
+    for (let i = 0; i < this.n; i++) {
+      rhs[i] = -rhs[i];
+    }
+
+    for (let c = 0; c < this.systems.length; c++) {
+      const s = this.systems[c];
+      const map = this.interior[c];
+      const off = this.offsets[c];
+
+      for (let i = 1; i < s.frames.length; i++) {
+        if (s.lambdaAt[i] >= 0) {
+          rhs[off + map[s.lambdaAt[i]]] = -s.residuals[i];
+        }
+      }
+    }
+
+    for (let g = 0; g < this.gamma.length; g++) {
+      if (this.gamma[g].kind === "row") {
+        rhs[this.gammaAt + g] = -this.nodeResiduals[g];
+      }
+    }
+
+    return rhs;
+  }
+
+  /**
+   * Run the outer iteration. Returns the steps taken, the final residual, and whether every
+   * factorization held.
+   *
+   * Each pass writes the DOF out, measures the geometry they produced, then linearizes about
+   * *that* state — so the transform used to build the coefficients and the transform used to
+   * build `H` are the same one. The arclength estimate only moves at the end of a pass,
+   * which is what makes `L_e` an outer-iteration quantity rather than a circular one.
+   *
+   * Steps are accepted by a backtracking search on §5's `ℓ1` merit
+   *
+   * ```
+   *   ϕ(z) = ½ zᵀHz + μ·Σ|c_i(z)| ,       μ > max|λ|
+   * ```
+   *
+   * which is the standard exact penalty for an equality-constrained minimization: with `μ`
+   * above the multipliers the Newton direction is a descent direction for it, and a solution
+   * of the original problem is a local minimum of it. `H` is held at the linearization point
+   * for the duration of one search — only `c` is remeasured, on the actual curves — so the
+   * comparison is between two states of the same model.
+   *
+   * The search is over the *component*, not over one chain at a time. A per-chain search would
+   * be a different algorithm: a coupled interface makes one direction, and cutting one chain's
+   * share of it while leaving another's would leave the shared DOF holding two values.
+   */
+  run(): ComponentRun {
+    const opts = this.options;
+    const rhs = new Float64Array(this.n);
+    const step = new Float64Array(this.n);
+    const base = new Float64Array(this.n);
+
+    const history: number[] = [];
+    const trace = opts.trace ? ([] as TraceStep[]) : undefined;
+
+    let steps = 0;
+    let factored = true;
+    let mu = 1.0;
+
+    let backtracks = 0;
+    let starved = false;
+    let refinement = 0.0;
+    let multiplier = 0.0;
+
+    this.gather();
+    this.write();
+
+    let residual = this.measure();
+
+    for (let iter = 0; ; iter++) {
+      if (iter >= opts.iterations || residual < opts.tolerance || this.multiplierRows.length === 0) {
+        break;
+      }
+
+      this.build();
+      this.gradient(rhs);
+
+      const solved = this.solve(rhs, step);
+
+      refinement = Math.max(refinement, solved.residual);
+
+      if (!solved.ok) {
+        factored = false;
+        break;
+      }
+
+      for (const row of this.multiplierRows) {
+        mu = Math.max(mu, 2.0 * Math.abs(this.z[row] + step[row]));
+      }
+
+      base.set(this.z);
+
+      const start = this.merit(mu);
+      let t = opts.relaxation;
+      let cuts = 0;
+
+      for (;;) {
+        for (let i = 0; i < this.n; i++) {
+          this.z[i] = base[i] + t * step[i];
+        }
+
+        this.take(this.z);
+        this.write();
+        this.measure();
+
+        if (this.merit(mu) < start) {
+          break;
+        }
+
+        // Out of room rather than out of patience: the direction was not a descent one.
+        if (t < MIN_RELAXATION) {
+          starved = true;
+          break;
+        }
+
+        t *= SHRINK;
+        cuts++;
+      }
+
+      backtracks = Math.max(backtracks, cuts);
+
+      // `L_e` only moves here, between passes — the coefficients are rebuilt through the
+      // updated `M_e` so the next linearization point is a self-consistent one.
+      for (const s of this.systems) {
+        for (let i = 0; i < s.frames.length; i++) {
+          s.frames[i].arclength = s.arclength[i];
+        }
+      }
+
+      this.write();
+      residual = this.measure();
+
+      steps++;
+
+      const largest = this.largestMultiplier();
+
+      multiplier = Math.max(multiplier, largest);
+
+      if (history.length >= RATE_WINDOW) {
+        history.shift();
+      }
+
+      history.push(residual);
+
+      trace?.push({
+        merit: this.merit(mu),
+        residual,
+        stepNorm     : t * infinityNorm(step),
+        maxMultiplier: largest,
+        relaxation   : t,
+        refinement   : solved.residual,
+      });
+    }
+
+    return {
+      steps,
+      residual,
+      factored,
+      ok: factored && Number.isFinite(residual),
+      history,
+      backtracks,
+      starved,
+      refinement,
+      multiplier,
+      trace,
+    };
+  }
+}
+
+/**
  * Fits every {@link SPowerClothoid} in a mesh so the segments meet tangentially.
  *
- * Chains are solved independently, which §5 licenses as long as no vertex block is shared
- * across a chain boundary — true here, since Phase 2 predates the pairing levels of §3 and
- * every node is fully split. `Rᵥ` still couples them, benignly, because it is built from
- * chord lengths and so does not move during the solve.
+ * The mesh is cut into chains, the chains grouped into the components of §5 by what they
+ * share at their ends, and each component solved as one system. Two chains are in different
+ * components exactly when no vertex block and no G1 row spans them, which is what §5 requires
+ * before independent solves are licensed — and which §3's default at valence ≥ 3 makes true
+ * of every unauthored junction, so the ordinary mesh still comes apart into one chain per
+ * component. `Rᵥ` couples every incident edge at every node and is not a component boundary,
+ * benignly: it is built from chord lengths and so does not move during the solve.
  */
 export class SPowerSolver implements CurveSolver {
   options: SPowerSolverOptions;
@@ -1353,19 +2154,18 @@ export class SPowerSolver implements CurveSolver {
       report.traces = [];
     }
 
-    // Skipped chains take an index too, so the diagnostic's `chain` is a position and not a rank.
-    let index = -1;
+    const all = chains(this.mesh).map(cutOpen);
 
-    for (const chain of chains(this.mesh)) {
-      index++;
-      report.chains++;
+    report.chains = all.length;
 
+    for (const chain of all) {
       if (chain.closed) {
-        report.skippedClosed++;
-        continue;
+        report.cutClosed++;
       }
+    }
 
-      this.solveChain(chain, refs, index, report);
+    for (const component of components(all, this.options.order)) {
+      this.solveComponent(component, refs, report);
     }
 
     this.report = report;
@@ -1374,8 +2174,8 @@ export class SPowerSolver implements CurveSolver {
   }
 
   /**
-   * Solve one chain, lowering a joint and retrying for as long as §8 says the answer cannot
-   * be trusted.
+   * Solve one component, lowering a joint and retrying for as long as §8 says the answer
+   * cannot be trusted.
    *
    * The first attempt always asks for the authored levels, whatever is in {@link broken} —
    * hysteresis lives in the thresholds {@link ChainSystem.faults} compares against, not in the
@@ -1386,17 +2186,22 @@ export class SPowerSolver implements CurveSolver {
    * Each pass lowers exactly one joint by exactly one level — the shallowest response that
    * addresses the fault — and rebuilds the system, because a level is a change of *layout* and
    * not a coefficient that could be edited in place.
+   *
+   * Every joint reachable this way is chain-interior. §8's localization does not yet run at a
+   * junction, which is a gap and not a decision the machinery forces: the criteria are all
+   * measurable there. It costs nothing today because a junction §3 has not been told about is
+   * fully split already, and so has no level left to lose.
    */
-  solveChain(chain: Chain, refs: Map<SolvableVertex, number>, index: number, report: SPowerSolverReport) {
+  solveComponent(component: Component, refs: Map<SolvableVertex, number>, report: SPowerSolverReport) {
     const opts = this.options;
     const caps = new Map<SolvableVertex, number>();
     const actions: Diagnostic[] = [];
 
-    let { system, run } = this.ladder(chain, refs, caps, report);
+    let { systems, run } = this.ladder(component, refs, caps, report);
     let refused = false;
 
     for (let attempt = 0; attempt < opts.breaks; attempt++) {
-      const faults = system.faults(run, this.broken);
+      const faults = this.rank(component, systems, run);
 
       if (faults.length === 0) {
         break;
@@ -1405,7 +2210,7 @@ export class SPowerSolver implements CurveSolver {
       if (opts.mode === "engineering") {
         refused = true;
 
-        for (const fault of faults) {
+        for (const { system, index, fault } of faults) {
           actions.push(this.record(fault, "refused", index, system, system.delivered[fault.at]));
         }
 
@@ -1414,57 +2219,89 @@ export class SPowerSolver implements CurveSolver {
 
       // A joint already at 0 has nothing left to give; look past it rather than giving up,
       // since the fault it still reports may be the second-worst one and fixable.
-      const fault = faults.find((f) => system.delivered[f.at] > 0);
+      const found = faults.find(({ system, fault }) => system.delivered[fault.at] > 0);
 
-      if (!fault) {
+      if (!found) {
         break;
       }
 
-      const to = system.delivered[fault.at] - 1;
+      const to = found.system.delivered[found.fault.at] - 1;
 
-      actions.push(this.record(fault, "degraded", index, system, to));
-      caps.set(fault.vertex, to);
+      actions.push(this.record(found.fault, "degraded", found.index, found.system, to));
+      caps.set(found.fault.vertex, to);
 
-      ({ system, run } = this.ladder(chain, refs, caps, report));
+      ({ systems, run } = this.ladder(component, refs, caps, report));
     }
 
-    for (let i = 1; i < chain.edges.length; i++) {
-      const v = chain.verts[i];
-      const cap = caps.get(v);
+    for (const { verts, edges } of component.chains) {
+      for (let i = 1; i < edges.length; i++) {
+        const v = verts[i];
+        const cap = caps.get(v);
 
-      if (cap === undefined) {
-        this.broken.delete(v);
-      } else {
-        this.broken.set(v, cap);
-        report.degraded++;
+        if (cap === undefined) {
+          this.broken.delete(v);
+        } else {
+          this.broken.set(v, cap);
+          report.degraded++;
+        }
       }
     }
 
     report.steps += run.steps;
-    report.unenforced += system.unenforced();
     report.maxResidual = Math.max(report.maxResidual, run.residual);
     report.ok &&= run.ok && !refused;
 
-    system.diagnose(index, run, report.diagnostics);
+    for (let k = 0; k < systems.length; k++) {
+      const index = component.indices[k];
+
+      report.unenforced += systems[k].unenforced();
+
+      if (k === 0) {
+        systems[k].diagnose(index, run, report.diagnostics);
+      } else {
+        systems[k].localDiagnostics(index, report.diagnostics);
+      }
+    }
+
     report.diagnostics.push(...actions);
 
     if (run.trace) {
-      report.traces?.push({ chain: index, steps: run.trace });
+      report.traces?.push({ chain: component.indices[0], steps: run.trace });
     }
   }
 
   /**
-   * Build and solve one chain at the requested order, climbing to it if §9's continuation is
-   * on. Returns the top rung, which is the only one whose answer counts.
+   * Every chain's faults, merged into one list in §8's order: rank, then chord, then
+   * divergence — cause before symptom.
+   *
+   * The sort is across chains and not within one, because concatenation would let the first
+   * chain's *symptom* outrank a later chain's *cause* and the whole point of the ordering is
+   * that it does not. A single-chain component sorts to the order {@link ChainSystem.faults}
+   * already emitted, the sort being stable.
+   */
+  rank(component: Component, systems: ChainSystem[], run: ComponentRun) {
+    const found = systems.flatMap((system, k) =>
+      system.faults(run, this.broken).map((fault) => ({ system, index: component.indices[k], fault }))
+    );
+
+    return found.sort((a, b) => FAULT_ORDER.indexOf(a.fault.condition) - FAULT_ORDER.indexOf(b.fault.condition));
+  }
+
+  /**
+   * Build and solve one component at the requested order, climbing to it if §9's continuation
+   * is on. Returns the top rung, which is the only one whose answer counts.
    *
    * A rung that failed is not seeded from: a warm start built out of a broken solve is worse
    * than no warm start, and the failure is the top rung's to rediscover and report. The ladder
    * is rebuilt from `p = 0` after every break rather than resumed, because a lowered level
    * changes the layout at every order and the rungs below have to answer the same question the
    * top one is being asked.
+   *
+   * The interface is rebuilt per rung and the *grouping* is not — see {@link components} for
+   * why lowering `p` cannot split a component, only shrink its interface.
    */
   ladder(
-    chain: Chain,
+    component: Component,
     refs: Map<SolvableVertex, number>,
     caps: Map<SolvableVertex, number>,
     report: SPowerSolverReport
@@ -1472,18 +2309,24 @@ export class SPowerSolver implements CurveSolver {
     const opts = this.options;
     const first = opts.continuation ? 0 : opts.order;
 
-    let system!: ChainSystem;
-    let run!: ChainRun;
-    let seed: ChainSystem | undefined;
+    let systems!: ChainSystem[];
+    let run!: ComponentRun;
+    let seed: ChainSystem[] | undefined;
 
     for (let p = first; p <= opts.order; p++) {
-      system = new ChainSystem(chain, refs, p === opts.order ? opts : { ...opts, order: p }, caps);
+      const rung = p === opts.order ? opts : { ...opts, order: p };
+
+      systems = component.chains.map((chain) => new ChainSystem(chain, refs, rung, caps));
 
       if (seed) {
-        system.seedFrom(seed);
+        for (let k = 0; k < systems.length; k++) {
+          systems[k].seedFrom(seed[k]);
+        }
       }
 
-      run = system.run();
+      const slots = p === opts.order ? component.gamma : interfaceSlots(component.chains, p);
+
+      run = new ComponentSystem(systems, slots).run();
 
       if (p < opts.order) {
         report.seedSteps += run.steps;
@@ -1493,13 +2336,13 @@ export class SPowerSolver implements CurveSolver {
         // tolerance, is not seeded from.
         const converged = run.ok && run.residual < opts.tolerance;
 
-        seed = converged && system.faults(run).length === 0 ? system : seed;
+        seed = converged && systems.every((s) => s.faults(run).length === 0) ? systems : seed;
       }
     }
 
     report.attempts++;
 
-    return { system, run };
+    return { systems, run };
   }
 
   /**

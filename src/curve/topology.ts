@@ -77,6 +77,26 @@ function follow<C extends Curve>(start: SolvableVertex, first: SolvableEdge<C>, 
 }
 
 /**
+ * Repeat a closed chain's first vertex at its end, so every chain is a path — §5's cut point.
+ *
+ * A cyclic band is not a band, and §5 offers two ways out: bordering, or promoting a vertex
+ * to a node and letting the Schur complement carry the wrap-around. This is the second. The
+ * cut vertex then appears twice, once at each end, with a block at each, and the two are
+ * reconciled through the junction machinery exactly as two chains meeting at a node are.
+ *
+ * `closed` survives the cut, because "these two ends are the same vertex" stays true and is
+ * how a caller knows the extra vertex is not a real one. Open chains are returned unchanged
+ * and uncopied.
+ */
+export function cutOpen<C extends Curve>(chain: Chain<C>): Chain<C> {
+  if (!chain.closed) {
+    return chain;
+  }
+
+  return { verts: [...chain.verts, chain.verts[0]], edges: chain.edges, closed: true };
+}
+
+/**
  * Decompose a mesh into nodes and chains — `docs/plans/spower-solver.md` §5.
  *
  * Nodes are the vertices of valence other than 2; chains are the maximal paths between

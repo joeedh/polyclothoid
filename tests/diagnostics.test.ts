@@ -28,7 +28,7 @@ import {
   Clothoid,
   CubicBezier,
   BSpline,
-  type ChainRun,
+  type ComponentRun,
   type Diagnostic,
   SPowerClothoid,
   SPowerSolver,
@@ -281,7 +281,7 @@ describe("Phase 5: what gets recorded", () => {
 
     const system = new ChainSystem(chain, refs, defaultSPowerSolverOptions);
 
-    const failed: ChainRun = {
+    const failed: ComponentRun = {
       steps     : 1,
       residual  : 0.5,
       factored  : false,
