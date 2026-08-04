@@ -9,9 +9,30 @@ import { type SolveReport } from "./diagnostics.js";
  * keeps `curve/` from importing `mesh/` — the dependency runs one way, mesh -> curve. See
  * `docs/architecture.md`.
  */
+/**
+ * An authored pairing of two edge-ends at a vertex, carrying a continuity level — §3.
+ *
+ * The level is a *ceiling*: the solver may deliver less (§8) and never more. `0` is a corner,
+ * `1` is G1, and `k` shares block entries `0 … k−2` on top of the G1 row, up to `p + 2`.
+ * Levels are authored by client mesh code; nothing in `curve/` infers one.
+ */
+export interface Pairing {
+  a: SolvableEdge;
+  b: SolvableEdge;
+  level: number;
+}
+
 export interface SolvableVertex extends CurveVertex {
   edges: SolvableEdge[];
   otherEdge(e: SolvableEdge): SolvableEdge | undefined;
+
+  /**
+   * Authored pairings at this vertex, if the mesh carries any.
+   *
+   * An absent or empty list is not "everything is a corner" — it means *unspecified*, and
+   * `pairing.ts` fills it in from valence. Only valence ≤ 2 has a default worth having.
+   */
+  pairings?: Pairing[];
 }
 
 export interface SolvableEdge<C extends Curve = Curve> extends CurveEdge {

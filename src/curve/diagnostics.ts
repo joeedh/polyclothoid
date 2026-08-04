@@ -32,12 +32,11 @@ import { type CurveEdge, type CurveVertex } from "./curve.js";
 /**
  * What was measured. One member per row of §8's table.
  *
- * Three are declared but not yet emitted, because they are the two measurements §8 admits
- * are not free plus the outcome of acting on them, and acting is Phase 6's job:
- * `g1-rank-deficiency` (a pivoted QR of the local `J` block), `ill-conditioned-hessian` (a
- * condition estimate of the `(1,1)` block), and `level-lowered`. `large-multiplier` is
- * likewise Phase 6 — §8 is explicit that `|λ_v|` is corner evidence for the client and not
- * a fault the solver may act on.
+ * One is declared and not emitted: `ill-conditioned-hessian`, the only row of §8's table that
+ * is neither free nor localizable. A Hager–Higham 1-norm estimate costs several solves against
+ * an already-factored matrix, and what it returns is one number for the whole chain — which is
+ * not a *located* record, so it fails the shape this module exists to enforce. The per-element
+ * condition numbers that *are* free say nothing about the assembled `H`.
  */
 export type DiagnosticCondition =
   | "chord-degeneracy"
@@ -116,6 +115,52 @@ export const diagnosticThresholds = {
 
   /** `‖Ax − b‖∞` after iterative refinement, in equilibrated units — §5's `δ` left too much behind. */
   refinement: 1e-8,
+
+  /** `σ_min/σ_max` of a node's local G1 block, by pivoted QR. Below this the rows are dependent. */
+  rankDeficiency: 1e-8,
+};
+
+/**
+ * When a measurement stops being worth reporting and starts being worth *acting on* — §8.
+ *
+ * Two rules shape every number here.
+ *
+ * 1. **Breaking is a worse outcome than reporting**, so each break threshold sits past the
+ *    matching {@link diagnosticThresholds} entry. A chain that converges slowly gets a record
+ *    and keeps its continuity; only one that is not converging at all loses a level.
+ * 2. **Break and restore differ**, which is §8's hysteresis requirement and the reason the
+ *    pairs are here at all. A joint sitting exactly on one threshold would otherwise flip
+ *    every solve as the input jitters, and the visible symptom is a corner that blinks. The
+ *    restore side is the stricter of the two: a joint has to become comfortably healthy to
+ *    get its level back, not merely stop being unhealthy.
+ */
+export const stabilityThresholds = {
+  /** `|C(1)|` below this is a segment the similarity transform can no longer represent. */
+  chordBreak: 0.02,
+
+  /** …and it takes five times that to hand the level back. */
+  chordRestore: 0.1,
+
+  /** Fitted per-step factor. At `1.0` the iteration has stopped making progress at all. */
+  rateBreak: 1.0,
+
+  /** …and a restored joint has to actually converge, not merely creep. */
+  rateRestore: 0.5,
+
+  /** `σ_min/σ_max` of the local G1 block, below which the constraint rows are dependent. */
+  rankBreak: 1e-8,
+
+  /** …with two orders of margin before the rows count as independent again. */
+  rankRestore: 1e-6,
+
+  /**
+   * `|λ_v|` over the chain's median, past which the joint is reported as corner evidence.
+   *
+   * Reporting only. §8 is explicit that a large multiplier means the joint is *expensive to
+   * hold*, which is a judgement about whether a corner was wanted there — modelling, not
+   * stability — and that the solver may not act on it. It is here so a client can.
+   */
+  multiplierRatio: 4,
 };
 
 /** Residuals kept for {@link geometricRate}. Six, so the fit sees a trend and not the whole run. */
@@ -199,12 +244,17 @@ export interface SolveTrace {
 /** What every {@link CurveSolver} hands back. */
 export interface SolveReport {
   /**
-   * False if the solve produced nothing usable — a factorization that failed, or geometry
-   * that went non-finite.
+   * False if the solve produced nothing usable — a factorization that failed, geometry that
+   * went non-finite, or a refusal.
    *
    * Not a convergence test. A chain that stalls at a visible angle gap has still produced an
    * answer, and reports that through an `error` diagnostic; `ok` stays true. Anything that
    * clears `ok` also leaves at least one located record saying where.
+   *
+   * Refusal is §9's engineering mode: the same detection, and instead of degrading the joint
+   * the solve declines to deliver less than was asked for. The records carry
+   * {@link DiagnosticAction} `"refused"` and the geometry is left as the last attempt made it
+   * — usable to look at, not to trust.
    */
   ok: boolean;
 

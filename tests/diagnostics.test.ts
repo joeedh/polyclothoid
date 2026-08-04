@@ -178,7 +178,7 @@ describe("Phase 5: what gets recorded", () => {
     the suite that genuinely fails to converge, so it is what pins both Newton criteria.
   */
   it("reports the frozen Jacobian's stall as not converging", () => {
-    const report = new SPowerSolver(polyline(ZIGZAG).mesh, { jacobian: "frozen" }).solve();
+    const report = new SPowerSolver(polyline(ZIGZAG).mesh, { jacobian: "frozen", breaks: 0 }).solve();
 
     assert.ok(report.maxResidual > 1e-3, `unexpectedly converged to ${report.maxResidual}`);
 
@@ -260,7 +260,7 @@ describe("Phase 5: what gets recorded", () => {
   it("catches a runaway from the other side, where the residual claims success", () => {
     const { mesh, edges } = polyline(HAIRPIN);
 
-    const report = new SPowerSolver(mesh).solve();
+    const report = new SPowerSolver(mesh, { breaks: 0 }).solve();
 
     assert.ok(report.maxResidual < 1e-12, `fixture stopped claiming success: ${report.maxResidual}`);
 
@@ -334,7 +334,7 @@ describe("Phase 5: the trace", () => {
   it("carries the history that shows what a stall looks like", () => {
     const { mesh } = polyline(ZIGZAG);
 
-    const report = new SPowerSolver(mesh, { jacobian: "frozen", trace: true, iterations: 12 }).solve();
+    const report = new SPowerSolver(mesh, { jacobian: "frozen", trace: true, iterations: 12, breaks: 0 }).solve();
     const steps = report.traces![0].steps;
 
     assert.equal(steps.length, 12);

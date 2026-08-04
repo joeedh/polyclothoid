@@ -1,4 +1,4 @@
-import { Vector2 } from "./math/index.js";
+import { Vector2, clamp } from "./math/index.js";
 import { Mesh, type CurveConstructor, type CurveSolverConstructor } from "./mesh/index.js";
 
 /** Called once per dab. `dx`/`dy` is the unit tangent; `t` is 0..1 along the segment. */
@@ -24,7 +24,25 @@ const HISTORY = 6;
 export interface StrokerOptions {
   CurveCls?: CurveConstructor;
   SolverCls?: CurveSolverConstructor;
+
+  /**
+   * Input-polyline turns sharper than this are authored as corners — level-0 pairings.
+   *
+   * This used to be `ClothoidSolverOptions.cornerThreshold`, and it is here because it is
+   * *inference*: a guess, from pre-solve geometry, about what the person drawing meant. The
+   * solvers take authored levels and never invent one, so the guess has to be made by whoever
+   * owns the input — see `docs/plans/spower-solver.md` §3 and §11. Its being a stroker
+   * concern is also why it has always been about pointer devices: fast input genuinely turns
+   * a corner between two samples, and rounding those off looks like the fitter lagging.
+   *
+   * Measured as the interior angle between the two chords, so smaller is sharper and `π` is
+   * straight through. Set it to `0` to author no corners at all.
+   */
+  cornerThreshold?: number;
 }
+
+/** ~72°, the value `ClothoidSolver` used before the test moved out here. */
+export const DEFAULT_CORNER_THRESHOLD = Math.PI * 0.4;
 
 export class Stroker {
   callback: StrokeCallback;
@@ -138,6 +156,8 @@ export class Stroker {
       mesh.makeEdge(v4, v5);
     }
 
+    this.markCorners(mesh);
+
     mesh.solve();
     this.lastMesh = mesh;
 
@@ -160,5 +180,37 @@ export class Stroker {
     }
 
     this.lastS = s - elen;
+  }
+
+  /**
+   * Author a level-0 pairing wherever the input turned sharply — {@link
+   * StrokerOptions.cornerThreshold}.
+   *
+   * Only at valence 2, which is every vertex a fitted segment has; a junction has no canonical
+   * pairing to author and the stroker does not build one. The `0.99999` scaling on the dot
+   * product is inherited from the original and keeps `acos` off its infinite-slope endpoints,
+   * where a doubled-back chord would otherwise cost several digits.
+   */
+  markCorners(mesh: Mesh) {
+    const threshold = this.options.cornerThreshold ?? DEFAULT_CORNER_THRESHOLD;
+
+    if (!(threshold > 0.0)) {
+      return;
+    }
+
+    for (const v of mesh.verts) {
+      if (v.edges.length !== 2) {
+        continue;
+      }
+
+      const [e1, e2] = v.edges;
+
+      const t1 = new Vector2(e1.otherVertex(v)).sub(v).normalize();
+      const t2 = new Vector2(e2.otherVertex(v)).sub(v).normalize();
+
+      if (Math.acos(clamp(t1.dot(t2) * 0.99999, -1.0, 1.0)) < threshold) {
+        v.setPairing(e1, e2, 0);
+      }
+    }
   }
 }

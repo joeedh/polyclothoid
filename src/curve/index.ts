@@ -1,12 +1,30 @@
 export { Curve, type Canvas2DLike, type CanvasPaint, type CurveEdge, type CurveVertex } from "./curve.js";
-export { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+export {
+  type CurveSolver,
+  type Pairing,
+  type SolvableEdge,
+  type SolvableMesh,
+  type SolvableVertex,
+} from "./mesh_types.js";
 export { chains, walk, type Chain } from "./topology.js";
+
+export {
+  defaultLevel,
+  findPairing,
+  levelFor,
+  maxLevel,
+  pairingLevel,
+  sharing,
+  vertexPartitions,
+  type Sharing,
+} from "./pairing.js";
 
 export {
   RATE_WINDOW,
   diagnosticThresholds,
   emptySolveReport,
   geometricRate,
+  stabilityThresholds,
   type Diagnostic,
   type DiagnosticAction,
   type DiagnosticCondition,
@@ -111,6 +129,7 @@ export {
   SPowerSolver,
   defaultSPowerSolverOptions,
   type ChainRun,
+  type Fault,
   type SPowerSolverOptions,
   type SPowerSolverReport,
 } from "./spower_solver.js";

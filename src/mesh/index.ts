@@ -4,6 +4,7 @@ export {
   ElementArray,
   ElementSet,
   Vertex,
+  VertexPairing,
   Handle,
   Edge,
   Loop,

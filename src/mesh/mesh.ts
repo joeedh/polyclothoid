@@ -54,6 +54,38 @@ mesh.Element {
   constructor(public type: number) {}
 }
 
+/**
+ * An authored continuity pairing between two of a vertex's edge-ends — `curve/pairing.ts`.
+ *
+ * Document state, not solve state: it is the ceiling the solver works under, so it is
+ * serialized and a load/solve/save round-trip must not change it.
+ */
+export class VertexPairing {
+  static STRUCT = nstructjs.inlineRegister(
+    this,
+    `
+mesh.VertexPairing {
+  a     : int | this.a.eid;
+  b     : int | this.b.eid;
+  level : int;
+}
+`
+  );
+
+  a!: Edge;
+  b!: Edge;
+  level = 0;
+
+  constructor(a?: Edge, b?: Edge, level = 0) {
+    if (a && b) {
+      this.a = a;
+      this.b = b;
+    }
+
+    this.level = level;
+  }
+}
+
 export class Vertex extends Element {
   static override STRUCT = nstructjs.inlineRegister(
     this,
@@ -63,11 +95,15 @@ mesh.Vertex {
   1           : float;
   2           : float;
   edges       : array(e, int) | e.eid;
+  pairings    : array(mesh.VertexPairing);
 }
 `
   );
 
   edges: Edge[] = [];
+
+  /** Empty means unspecified, which `curve/pairing.ts` reads as the valence default. */
+  pairings: VertexPairing[] = [];
 
   constructor(co?: VecLike) {
     super(MeshTypes.VERTEX);
@@ -77,6 +113,30 @@ mesh.Vertex {
     if (co !== undefined) {
       this.load(co);
     }
+  }
+
+  /** The authored pairing of `a` and `b` here, in either order. */
+  pairing(a: Edge, b: Edge) {
+    return this.pairings.find((p) => (p.a === a && p.b === b) || (p.a === b && p.b === a));
+  }
+
+  /**
+   * Author a continuity level between two edge-ends. This is where corner detection lands.
+   *
+   * A level at or above the ceiling is stored as authored and clamped when it is read, so
+   * raising `p` later restores the continuity that was asked for rather than the one that
+   * happened to fit.
+   */
+  setPairing(a: Edge, b: Edge, level: number) {
+    const existing = this.pairing(a, b);
+
+    if (existing) {
+      existing.level = level;
+    } else {
+      this.pairings.push(new VertexPairing(a, b, level));
+    }
+
+    return this;
   }
 
   /** Only meaningful on 2-valence vertices, which is what the curve solvers walk. */
@@ -566,6 +626,9 @@ mesh.Mesh {
   CurveCls: CurveConstructor = Clothoid;
   SolverCls: CurveSolverConstructor = ClothoidSolver;
 
+  /** The live {@link SolverCls} instance, kept for its cross-solve state — see {@link solve}. */
+  solver?: CurveSolver;
+
   elists = new Map<number, ElementArray>();
 
   verts!: ElementArray<Vertex>;
@@ -633,11 +696,21 @@ mesh.Mesh {
    *
    * Also kept on {@link report}, because {@link ensureSolve} is the path most callers take
    * and it has nowhere to return a value to.
+   *
+   * The solver instance is kept rather than rebuilt, because §8's hysteresis is state that
+   * has to outlive one solve to mean anything — a joint that lost a continuity level has to
+   * remember it in order to be held to the stricter threshold when it asks for it back. It is
+   * dropped whenever {@link SolverCls} changes, since the levels a solver withheld say nothing
+   * about a different curve type.
    */
   solve() {
     this.recalc &= ~RecalcFlags.SOLVE;
 
-    this.report = new this.SolverCls(this).solve();
+    if (!this.solver || !(this.solver instanceof this.SolverCls)) {
+      this.solver = new this.SolverCls(this);
+    }
+
+    this.report = this.solver.solve();
 
     return this.report;
   }
@@ -646,6 +719,7 @@ mesh.Mesh {
   switchSplineType(CurveCls: CurveConstructor, SolverCls: CurveSolverConstructor) {
     this.CurveCls = CurveCls;
     this.SolverCls = SolverCls;
+    this.solver = undefined;
 
     for (const e of this.edges) {
       e.curve = new CurveCls(e.v1, e.v2);
@@ -814,6 +888,10 @@ mesh.Mesh {
 
     listRemove(e.v1.edges, e);
     listRemove(e.v2.edges, e);
+
+    for (const v of [e.v1, e.v2]) {
+      v.pairings = v.pairings.filter((pairing) => pairing.a !== e && pairing.b !== e);
+    }
   }
 
   _killLoop(l: Loop) {
@@ -1168,6 +1246,14 @@ mesh.Mesh {
       const eids = v.edges as unknown as number[];
 
       v.edges = eids.map((eid) => get<Edge>(eid)!).filter(Boolean);
+
+      for (const pairing of v.pairings) {
+        pairing.a = get<Edge>(pairing.a)!;
+        pairing.b = get<Edge>(pairing.b)!;
+      }
+
+      /* A pairing naming an edge that did not survive is not a corner, it is a dangling ref. */
+      v.pairings = v.pairings.filter((pairing) => pairing.a && pairing.b);
     }
 
     for (const h of this.handles) {

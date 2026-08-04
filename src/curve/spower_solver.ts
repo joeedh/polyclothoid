@@ -42,17 +42,20 @@
  * without a merit test the coefficients ratchet, reaching `1e+70` by the sixty-fourth pass
  * on a four-edge zigzag before the factorization hands back `NaN`.
  */
-import { BandedSymmetric, type KKTSolveOptions, defaultKKTSolveOptions, solveKKT } from "../math/index.js";
+import { BandedSymmetric, type KKTSolveOptions, defaultKKTSolveOptions, rankRatio, solveKKT } from "../math/index.js";
 import { type EdgeFrame, type ProfileDOF, referenceLength, sPowerDOF } from "./blocks.js";
 import {
   type Diagnostic,
+  type DiagnosticCondition,
   RATE_WINDOW,
   type SolveReport,
   type TraceStep,
   diagnosticThresholds,
   geometricRate,
+  stabilityThresholds,
 } from "./diagnostics.js";
 import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { sharing } from "./pairing.js";
 import { SPOWER_ORDER, type SPowerClothoid } from "./spower_clothoid.js";
 import { MIN_CANONICAL_CHORD, type TransformJacobian, transformJacobian } from "./quadrature.js";
 import { type Chain, chains } from "./topology.js";
@@ -128,6 +131,26 @@ export interface SPowerSolverOptions {
    */
   trace: boolean;
 
+  /**
+   * What to do about a joint the solve cannot hold — §9's split, as a mode on the solve
+   * rather than a decision per joint.
+   *
+   * `"artistic"` degrades and reports: the joint loses a continuity level and the report says
+   * which, where and why. A stroke that renders slightly wrong beats one that does not render.
+   * `"engineering"` refuses and reports: detection is identical, the geometry is left where
+   * the last attempt put it, and {@link SolveReport.ok} goes false. Silently delivering less
+   * than was asked for is what neither mode is allowed to do.
+   */
+  mode: "artistic" | "engineering";
+
+  /**
+   * How many levels one chain may lose in a single solve, across all its joints.
+   *
+   * Three walks a `p = 1` joint the whole way from `G3` to a corner, so the default cannot
+   * run out of room on a chain; it is a bound on thrash, not on depth.
+   */
+  breaks: number;
+
   kkt: Partial<KKTSolveOptions>;
 }
 
@@ -140,6 +163,8 @@ export const defaultSPowerSolverOptions: SPowerSolverOptions = {
   dof       : sPowerDOF,
   jacobian  : "exact",
   trace     : false,
+  mode      : "artistic",
+  breaks    : 3,
   kkt       : {},
 };
 
@@ -162,6 +187,17 @@ export interface SPowerSolverReport extends SolveReport {
 
   /** Gauss-Newton steps actually taken, summed over chains. */
   steps: number;
+
+  /**
+   * Joints delivered below the level they were authored with — §8's breaks, counted.
+   *
+   * Zero in engineering mode by construction: it refuses rather than degrades. Every one of
+   * these has a `"degraded"` record in {@link SolveReport.diagnostics} saying where and why.
+   */
+  degraded: number;
+
+  /** Chain solves run, including the attempts thrown away. `chains − skippedClosed` when nothing broke. */
+  attempts: number;
 }
 
 function emptyReport(): SPowerSolverReport {
@@ -171,6 +207,8 @@ function emptyReport(): SPowerSolverReport {
     unenforced   : 0,
     maxResidual  : 0.0,
     steps        : 0,
+    degraded     : 0,
+    attempts     : 0,
     ok           : true,
     diagnostics  : [],
   };
@@ -216,6 +254,26 @@ export interface ChainRun {
 
   /** Present only with {@link SPowerSolverOptions.trace} on. */
   trace?: TraceStep[];
+}
+
+/**
+ * A stability criterion of §8, crossed, and pinned to the joint that will pay for it.
+ *
+ * Localization is the part that is not in §8, because §8 describes the criteria and not what
+ * they are evidence *about*. Two of the three measure something wider than one joint — a
+ * degenerate chord belongs to an edge, a divergent iteration to a whole chain — so each has
+ * to name a joint before the response can be per-joint, and the choice is documented at the
+ * point it is made in {@link ChainSystem.faults}.
+ */
+export interface Fault {
+  condition: DiagnosticCondition;
+
+  /** Vertex index within the chain. Always an interior one: a chain end has no level to lose. */
+  at: number;
+
+  vertex: SolvableVertex;
+  measured: number;
+  threshold: number;
 }
 
 /** `Rᵥ` for every vertex, from chord lengths only — §3, and §5's note that `Rᵥ` is shared. */
@@ -264,8 +322,21 @@ export class ChainSystem {
   frames: EdgeFrame[] = [];
   curves: SPowerClothoid[] = [];
 
-  /** Index of `block(verts[i])` in the solution vector. */
+  /** Index of the *shared* part of `block(verts[i])`. All of it wherever the level is at ceiling. */
   blockAt: Int32Array;
+
+  /** Where the arriving and leaving edge-ends keep the entries they do not share. */
+  arrivingAt: Int32Array;
+  leavingAt: Int32Array;
+
+  /** Entries shared at `verts[i]`, i.e. `delivered − 1` clamped — see {@link slot}. */
+  shared: Int32Array;
+
+  /** Authored continuity level at each vertex, ceiling-clamped. `-1` at a chain end. */
+  requested: Int32Array;
+
+  /** What the solve actually holds there, after any §8 lowering. Never above {@link requested}. */
+  delivered: Int32Array;
 
   /** Index of the multiplier at `verts[i]`, or `-1` where there is no enforced joint. */
   lambdaAt: Int32Array;
@@ -287,6 +358,9 @@ export class ChainSystem {
   /** Scratch for one coefficient-space constraint row. */
   weights: Float64Array;
 
+  /** Scratch for one assembled G1 row, column-indexed — see {@link g1Row}. */
+  g1 = new Map<number, number>();
+
   /** Element Hessians as of the last {@link assemble}, kept so the merit can reuse them. */
   elements: Float64Array[] = [];
 
@@ -295,7 +369,8 @@ export class ChainSystem {
   constructor(
     public chain: Chain,
     refs: Map<SolvableVertex, number>,
-    public options: SPowerSolverOptions
+    public options: SPowerSolverOptions,
+    lowered?: Map<SolvableVertex, number>
   ) {
     const { verts, edges } = chain;
     const dof = options.dof;
@@ -330,7 +405,25 @@ export class ChainSystem {
     }
 
     this.blockAt = new Int32Array(verts.length);
+    this.arrivingAt = new Int32Array(verts.length).fill(-1);
+    this.leavingAt = new Int32Array(verts.length).fill(-1);
     this.lambdaAt = new Int32Array(verts.length).fill(-1);
+
+    this.shared = new Int32Array(verts.length).fill(this.block);
+    this.requested = new Int32Array(verts.length).fill(-1);
+    this.delivered = new Int32Array(verts.length).fill(-1);
+
+    for (let i = 1; i < edges.length; i++) {
+      const { entries, tangent } = sharing(verts[i], edges[i - 1], edges[i], this.p);
+
+      // Coarsening makes the shared orders a prefix, so the level is recoverable from a count.
+      const level = tangent ? entries + 1 : 0;
+      const cap = lowered?.get(verts[i]);
+
+      this.requested[i] = level;
+      this.delivered[i] = cap === undefined ? level : Math.min(level, cap);
+      this.shared[i] = Math.max(0, Math.min(this.delivered[i] - 1, this.block));
+    }
 
     this.layout();
 
@@ -353,6 +446,10 @@ export class ChainSystem {
   enforced(i: number) {
     const f = this.frames;
 
+    if (this.delivered[i] < 1) {
+      return false;
+    }
+
     return this.options.jacobian === "exact" || seesTurning(f[i - 1], true) || seesTurning(f[i], false);
   }
 
@@ -361,53 +458,99 @@ export class ChainSystem {
    *
    * Placing `λ_i` immediately before `block(v_i)` is what keeps the system banded — its row
    * reaches the two adjacent blocks in either direction, and no further.
+   *
+   * A vertex below the ceiling level splits its block in three: the entries both ends share,
+   * then a private tail for the arriving end and one for the leaving end. At the ceiling the
+   * tails are empty and this is the single block of §3.
    */
   layout() {
     const m = this.chain.edges.length;
     let at = 0;
 
     for (let i = 0; i < this.chain.verts.length; i++) {
-      if (i > 0 && i < m && this.enforced(i)) {
+      const interior = i > 0 && i < m;
+
+      if (interior && this.enforced(i)) {
         this.lambdaAt[i] = at++;
         this.rows.push(this.lambdaAt[i]);
       }
 
       this.blockAt[i] = at;
-      at += this.block;
+      at += this.shared[i];
+
+      if (interior) {
+        const rest = this.block - this.shared[i];
+
+        this.arrivingAt[i] = at;
+        at += rest;
+
+        this.leavingAt[i] = at;
+        at += rest;
+      }
     }
 
     this.n = at;
   }
 
   /**
-   * Widest offset any assembled entry spans.
-   *
-   * Sized for a row touching *three* blocks even though the frozen row touches two, so that
-   * Phase 3's exact Jacobian needs no change here.
+   * Widest offset any assembled entry spans, measured off the layout rather than predicted
+   * from it — the split blocks make the old closed form wrong in both directions.
    */
   bandwidth() {
     const m = this.chain.edges.length;
-    const b = this.block;
+    const d = 2 * this.block;
     let w = 0;
 
     for (let i = 0; i < m; i++) {
-      w = Math.max(w, this.blockAt[i + 1] + b - 1 - this.blockAt[i]);
+      let lo = Infinity;
+      let hi = -Infinity;
+
+      for (let k = 0; k < d; k++) {
+        const at = this.at(i, k);
+
+        lo = Math.min(lo, at);
+        hi = Math.max(hi, at);
+      }
+
+      w = Math.max(w, hi - lo);
     }
 
     for (let i = 1; i < m; i++) {
       const at = this.lambdaAt[i];
 
-      if (at >= 0) {
-        w = Math.max(w, at - this.blockAt[i - 1], this.blockAt[i + 1] + b - 1 - at);
+      if (at < 0) {
+        continue;
+      }
+
+      for (const edge of [i - 1, i]) {
+        for (let k = 0; k < d; k++) {
+          w = Math.max(w, Math.abs(this.at(edge, k) - at));
+        }
       }
     }
 
     return Math.min(w, Math.max(0, this.n - 1));
   }
 
+  /**
+   * Global index of entry `n` of `verts[i]`, as read by the end arriving at it or leaving it.
+   *
+   * The two agree on the first {@link shared} entries and diverge after — which is the whole
+   * of what a lowered level does to the state space. It is a change of *structure*: there is
+   * no residual anywhere that measures the resulting `Gⁿ` discontinuity, because it is not a
+   * quantity the solve can see.
+   */
+  slot(i: number, n: number, arriving: boolean) {
+    if (n < this.shared[i]) {
+      return this.blockAt[i] + n;
+    }
+
+    return (arriving ? this.arrivingAt[i] : this.leavingAt[i]) + n - this.shared[i];
+  }
+
   /** Global index of local DOF `k` of edge `i`, whose DOF are its two blocks in chain order. */
   at(i: number, k: number) {
-    return k < this.block ? this.blockAt[i] + k : this.blockAt[i + 1] + k - this.block;
+    return k < this.block ? this.slot(i, k, false) : this.slot(i + 1, k - this.block, true);
   }
 
   /** Push the current DOF through `M_e` into each curve's coefficients. */
@@ -520,10 +663,28 @@ export class ChainSystem {
    * coefficients were built with, refreshed between passes. See §14.
    */
   constraintRow(i: number) {
-    const { p, block, frames, kkt } = this;
-    const dof = this.options.dof;
     const at = this.lambdaAt[i];
+
+    for (const [column, value] of this.g1Row(i)) {
+      this.kkt.add(at, column, value);
+    }
+  }
+
+  /**
+   * The same row as a sparse column-to-coefficient map, which is what the rank test needs.
+   *
+   * Assembly could scatter as it goes, but a joint whose two edges share a block writes the
+   * same column twice and {@link BandedSymmetric.add} accumulates — so the *matrix* is right
+   * either way while the *row* is not, and a rank test on a row with duplicate columns is
+   * measuring the wrong thing. One code path, summed first, keeps them the same object.
+   */
+  g1Row(i: number) {
+    const { p, block, frames } = this;
+    const dof = this.options.dof;
     const frozen = this.options.jacobian === "frozen";
+    const row = this.g1;
+
+    row.clear();
 
     // The arriving edge enters negatively, the leaving edge positively — as in `measure`.
     for (const arriving of [true, false]) {
@@ -532,14 +693,14 @@ export class ChainSystem {
       const sign = arriving ? -1.0 : 1.0;
       const far = seesTurning(frame, arriving);
 
-      let row: Float64Array;
+      let entries: Float64Array;
 
       if (frozen) {
         if (!far) {
           continue;
         }
 
-        row = dof.turningRow(p, frame);
+        entries = dof.turningRow(p, frame);
       } else {
         const w = this.weights;
 
@@ -553,13 +714,17 @@ export class ChainSystem {
           }
         }
 
-        row = dof.pullback(p, frame, w);
+        entries = dof.pullback(p, frame, w);
       }
 
       for (let k = 0; k < 2 * block; k++) {
-        kkt.add(at, this.at(edge, k), sign * row[k]);
+        const column = this.at(edge, k);
+
+        row.set(column, (row.get(column) ?? 0.0) + sign * entries[k]);
       }
     }
+
+    return row;
   }
 
   /**
@@ -723,14 +888,154 @@ export class ChainSystem {
   }
 
   /**
+   * `σ_min/σ_max` of the G1 rows at `verts[i]`, by column-pivoted QR — §8's first criterion.
+   *
+   * §8 is emphatic that this is measured on the *local* block and not by watching the pivots
+   * of the global factorization: pivot magnitude is not a rank test, Kahan's matrix being the
+   * standard counterexample. So the block is rebuilt here, in its own column order, where
+   * pivoting is free to choose.
+   *
+   * At valence 2 the block is a single row and the ratio is therefore `1` unless the row
+   * vanishes outright — which only the frozen Jacobian can arrange. The criterion is a
+   * junction phenomenon; the chain case is the degenerate one it has to survive, and does.
+   */
+  rankAt(i: number) {
+    if (this.lambdaAt[i] < 0) {
+      return 0.0;
+    }
+
+    const row = this.g1Row(i);
+    const cols = row.size;
+
+    if (cols === 0) {
+      return 0.0;
+    }
+
+    const a = new Float64Array(cols);
+    let c = 0;
+
+    for (const value of row.values()) {
+      a[c++] = value;
+    }
+
+    return rankRatio(a, 1, cols);
+  }
+
+  /**
+   * Every §8 criterion that came out past its threshold, worst structural cause first.
+   *
+   * `broken` is the hysteresis state: a joint already carrying a break is judged against the
+   * *restore* thresholds instead, so it has to become comfortably healthy to keep the level
+   * this attempt handed back rather than merely stop being unhealthy. That is the whole of the
+   * hysteresis, and it is per-joint rather than per-chain because the caps are.
+   *
+   * Ordering is rank, then chord, then divergence — cause before symptom. A rank-deficient
+   * joint makes the iteration diverge, and lowering the joint the *divergence* pointed at
+   * would be treating the second reading.
+   */
+  faults(run: ChainRun, broken?: Map<SolvableVertex, number>): Fault[] {
+    const limits = stabilityThresholds;
+    const { verts } = this.chain;
+    const found: Fault[] = [];
+    const healing = (v: SolvableVertex) => broken?.has(v) ?? false;
+
+    for (let i = 1; i < this.frames.length; i++) {
+      if (this.lambdaAt[i] < 0) {
+        continue;
+      }
+
+      const measured = this.rankAt(i);
+      const threshold = healing(verts[i]) ? limits.rankRestore : limits.rankBreak;
+
+      if (!(measured > threshold)) {
+        found.push({ condition: "g1-rank-deficiency", at: i, vertex: verts[i], measured, threshold });
+      }
+    }
+
+    for (let e = 0; e < this.curves.length; e++) {
+      const measured = this.curves[e].canonical;
+
+      // The edge is degenerate, but an edge has no level; its two ends do. Whichever end the
+      // solve is working hardest at is the one whose continuity is buying the degeneracy.
+      const at = this.strainedEnd(e);
+
+      if (at < 0) {
+        continue;
+      }
+
+      const threshold = healing(verts[at]) ? limits.chordRestore : limits.chordBreak;
+
+      if (!(measured <= 1.0) || measured < threshold) {
+        found.push({ condition: "chord-degeneracy", at, vertex: verts[at], measured, threshold });
+      }
+    }
+
+    const rate = geometricRate(run.history);
+    const stalled = run.steps >= this.options.iterations && !(run.residual < this.options.tolerance);
+    const at = this.worstJoint();
+
+    if (at >= 0) {
+      const threshold = healing(verts[at]) ? limits.rateRestore : limits.rateBreak;
+
+      // All three of §8's signals, and the fit is required rather than assumed: a run too
+      // short to fit a rate over three iterations is a budget, not a divergence, and a
+      // solve cut off at two steps must not cost anyone a continuity level.
+      const diverging = Number.isFinite(rate) && rate >= threshold && (stalled || run.starved);
+
+      if (!run.ok || diverging) {
+        const measured = Number.isFinite(rate) ? rate : Infinity;
+
+        found.push({ condition: "newton-not-converging", at, vertex: verts[at], measured, threshold });
+      }
+    }
+
+    return found;
+  }
+
+  /**
+   * Which end of edge `e` a break would have to act on: the interior one, or the busier of two.
+   *
+   * `-1` when neither end is an interior joint, which is a two-vertex chain — nothing to
+   * lower, so nothing to report as a fault either.
+   */
+  strainedEnd(e: number) {
+    const interior = (i: number) => i > 0 && i < this.frames.length && this.lambdaAt[i] >= 0;
+    const a = interior(e) ? e : -1;
+    const b = interior(e + 1) ? e + 1 : -1;
+
+    if (a < 0 || b < 0) {
+      return Math.max(a, b);
+    }
+
+    return Math.abs(this.residuals[a]) >= Math.abs(this.residuals[b]) ? a : b;
+  }
+
+  /** The enforced joint with the largest angle gap — where a non-converging chain is stuck. */
+  worstJoint() {
+    let at = -1;
+    let worst = -1.0;
+
+    for (let i = 1; i < this.frames.length; i++) {
+      if (this.lambdaAt[i] >= 0 && Math.abs(this.residuals[i]) > worst) {
+        worst = Math.abs(this.residuals[i]);
+        at = i;
+      }
+    }
+
+    return at;
+  }
+
+  /**
    * Turn one run into §8's records: located, typed, and carrying the measurement that
    * produced them alongside the threshold it crossed.
    *
    * Severity says which side of the threshold the *solve* came out on, not which side the
    * measurement did — a chain can converge slowly (`warning`) or not at all (`error`) on the
    * same fitted rate, and only the second is a failure. {@link Diagnostic.action} is `"none"`
-   * throughout, because nothing here breaks anything yet; Phase 6 is what gives the solver
-   * something to do about what Phase 5 measures.
+   * throughout: these are the records of the attempt that was *kept*, so by construction
+   * nothing was done about them. The records for what the solver did are written by
+   * {@link SPowerSolver.solve}, which is the only thing that knows an attempt was one of
+   * several.
    */
   diagnose(chain: number, run: ChainRun, into: Diagnostic[]) {
     const limits = diagnosticThresholds;
@@ -816,7 +1121,58 @@ export class ChainSystem {
       });
     }
 
+    this.multipliers(chain, into);
+
     return into;
+  }
+
+  /**
+   * Joints whose multiplier stands out from the chain's — §8's corner evidence, for a client.
+   *
+   * `|λ_v|` is the cost of holding the joint tangent, in the units of the energy, so what it
+   * says is "a corner may have been wanted here". §8 is explicit that this is *modelling* and
+   * not stability, and that the solver may not act on it: hence `info`, `action: "none"`, and
+   * no entry in {@link faults}. It is measured against the chain's own median rather than an
+   * absolute, because the energy scale is set by `Rᵥ` and means nothing across strokes.
+   */
+  multipliers(chain: number, into: Diagnostic[]) {
+    const ratio = stabilityThresholds.multiplierRatio;
+    const magnitudes = this.rows.map((row) => Math.abs(this.z[row])).sort((a, b) => a - b);
+
+    if (magnitudes.length === 0) {
+      return;
+    }
+
+    const median = magnitudes[magnitudes.length >> 1];
+
+    if (!(median > 0.0)) {
+      return;
+    }
+
+    for (let i = 1; i < this.frames.length; i++) {
+      const row = this.lambdaAt[i];
+
+      if (row < 0) {
+        continue;
+      }
+
+      const measured = Math.abs(this.z[row]);
+
+      if (measured < ratio * median) {
+        continue;
+      }
+
+      into.push({
+        condition: "large-multiplier",
+        severity : "info",
+        action   : "none",
+        chain,
+        at    : i,
+        vertex: this.chain.verts[i],
+        measured,
+        threshold: ratio * median,
+      });
+    }
   }
 
   /**
@@ -850,12 +1206,17 @@ export class ChainSystem {
     return 0.5 * energy + mu * infeasible;
   }
 
-  /** Interior joints this system chose not to constrain. See the module doc comment. */
+  /**
+   * Interior joints this system chose not to constrain. See the module doc comment.
+   *
+   * A joint delivered at level 0 has no row *by construction* and is not counted — that is an
+   * authored corner, or a break the report already accounts for elsewhere.
+   */
   unenforced() {
     let count = 0;
 
     for (let i = 1; i < this.frames.length; i++) {
-      if (this.lambdaAt[i] < 0) {
+      if (this.delivered[i] >= 1 && this.lambdaAt[i] < 0) {
         count++;
       }
     }
@@ -875,6 +1236,21 @@ export class ChainSystem {
 export class SPowerSolver implements CurveSolver {
   options: SPowerSolverOptions;
   report = emptyReport();
+
+  /**
+   * Levels currently withheld, per vertex — the whole of §8's hysteresis state.
+   *
+   * A solve always *tries* the authored levels first, so what is in here never lowers anything
+   * by itself; it only says which joints must clear the stricter restore thresholds rather
+   * than the break ones to keep what the attempt handed them. That keeps the delivered
+   * geometry a function of the input alone, while still making a joint that sits on a
+   * threshold stay where it is instead of blinking between a corner and a curve as the input
+   * jitters — which is the failure §8 asks hysteresis to prevent.
+   *
+   * Survives across solves on the solver instance, so a caller that rebuilds the solver each
+   * frame gets correct but memoryless behaviour. `Mesh` keeps one per spline type.
+   */
+  broken = new Map<SolvableVertex, number>();
 
   constructor(
     public mesh: SolvableMesh,
@@ -907,23 +1283,123 @@ export class SPowerSolver implements CurveSolver {
         continue;
       }
 
-      const system = new ChainSystem(chain, refs, this.options);
-      const run = system.run();
-
-      report.steps += run.steps;
-      report.unenforced += system.unenforced();
-      report.maxResidual = Math.max(report.maxResidual, run.residual);
-      report.ok &&= run.ok;
-
-      system.diagnose(index, run, report.diagnostics);
-
-      if (run.trace) {
-        report.traces?.push({ chain: index, steps: run.trace });
-      }
+      this.solveChain(chain, refs, index, report);
     }
 
     this.report = report;
 
     return report;
+  }
+
+  /**
+   * Solve one chain, lowering a joint and retrying for as long as §8 says the answer cannot
+   * be trusted.
+   *
+   * The first attempt always asks for the authored levels, whatever is in {@link broken} —
+   * hysteresis lives in the thresholds {@link ChainSystem.faults} compares against, not in the
+   * levels it starts from. So the delivered geometry depends on the input and not on the order
+   * of solves that reached it, which is the stronger half of §8's determinism requirement, and
+   * a joint still has to earn its level back against the restore thresholds.
+   *
+   * Each pass lowers exactly one joint by exactly one level — the shallowest response that
+   * addresses the fault — and rebuilds the system, because a level is a change of *layout* and
+   * not a coefficient that could be edited in place.
+   */
+  solveChain(chain: Chain, refs: Map<SolvableVertex, number>, index: number, report: SPowerSolverReport) {
+    const opts = this.options;
+    const caps = new Map<SolvableVertex, number>();
+    const actions: Diagnostic[] = [];
+
+    let system = new ChainSystem(chain, refs, opts, caps);
+    let run = system.run();
+    let refused = false;
+
+    report.attempts++;
+
+    for (let attempt = 0; attempt < opts.breaks; attempt++) {
+      const faults = system.faults(run, this.broken);
+
+      if (faults.length === 0) {
+        break;
+      }
+
+      if (opts.mode === "engineering") {
+        refused = true;
+
+        for (const fault of faults) {
+          actions.push(this.record(fault, "refused", index, system, system.delivered[fault.at]));
+        }
+
+        break;
+      }
+
+      // A joint already at 0 has nothing left to give; look past it rather than giving up,
+      // since the fault it still reports may be the second-worst one and fixable.
+      const fault = faults.find((f) => system.delivered[f.at] > 0);
+
+      if (!fault) {
+        break;
+      }
+
+      const to = system.delivered[fault.at] - 1;
+
+      actions.push(this.record(fault, "degraded", index, system, to));
+      caps.set(fault.vertex, to);
+
+      system = new ChainSystem(chain, refs, opts, caps);
+      run = system.run();
+
+      report.attempts++;
+    }
+
+    for (let i = 1; i < chain.edges.length; i++) {
+      const v = chain.verts[i];
+      const cap = caps.get(v);
+
+      if (cap === undefined) {
+        this.broken.delete(v);
+      } else {
+        this.broken.set(v, cap);
+        report.degraded++;
+      }
+    }
+
+    report.steps += run.steps;
+    report.unenforced += system.unenforced();
+    report.maxResidual = Math.max(report.maxResidual, run.residual);
+    report.ok &&= run.ok && !refused;
+
+    system.diagnose(index, run, report.diagnostics);
+    report.diagnostics.push(...actions);
+
+    if (run.trace) {
+      report.traces?.push({ chain: index, steps: run.trace });
+    }
+  }
+
+  /**
+   * One §8 record for something the solver *did*: the fault that caused it, and the levels
+   * either side of it.
+   *
+   * A joint that is only being put back where it already was gets `level-lowered` at `info`
+   * instead of its fault condition at `warning`. Both are true; the distinction is the one a
+   * caller reading the report actually wants, which is whether this is news.
+   */
+  record(fault: Fault, action: "degraded" | "refused", chain: number, system: ChainSystem, delivered: number) {
+    const carried = this.broken.get(fault.vertex);
+    const retained = action === "degraded" && carried !== undefined && delivered >= carried;
+
+    return {
+      condition: retained ? "level-lowered" : fault.condition,
+      severity : retained ? "info" : action === "refused" ? "error" : "warning",
+      action,
+      chain,
+      at       : fault.at,
+      vertex   : fault.vertex,
+      measured : fault.measured,
+      threshold: fault.threshold,
+      requested: system.requested[fault.at],
+      delivered,
+    } satisfies Diagnostic;
   }
 }

@@ -2,6 +2,7 @@ import { CacheRing, Constraint, Solver, Vector2, clamp, fract } from "../math/in
 import { Curve, type CurveEdge } from "./curve.js";
 import { emptySolveReport } from "./diagnostics.js";
 import { type CurveSolver, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { pairingLevel } from "./pairing.js";
 import { activeProfile } from "./profile.js";
 import * as nstructjs from "nstructjs";
 
@@ -307,9 +308,6 @@ export interface ClothoidSolverOptions {
    */
   progressiveRefinement: boolean;
 
-  /** Corners sharper than this are excluded from the solve and left as corners. */
-  cornerThreshold: number;
-
   iterations: number;
   relaxation: number;
 }
@@ -317,7 +315,6 @@ export interface ClothoidSolverOptions {
 export const defaultClothoidSolverOptions: ClothoidSolverOptions = {
   enableG2             : false,
   progressiveRefinement: false,
-  cornerThreshold      : Math.PI * 0.4,
   iterations           : 55,
   relaxation           : 0.7,
 };
@@ -461,10 +458,16 @@ function changeOrder(mesh: SolvableMesh, order: number) {
  * Gauss-Seidel: constraints are visited in order and each steps the parameters
  * immediately. See {@link ClothoidSolverOptions} for the parked experiments.
  *
- * The §8 report comes back empty. That is not an omission so much as the shape of the
- * thing: this iteration has no per-step residual to fit a rate to and no line search to
- * count backtracks in, and its one act of breaking — `cornerThreshold`, decided before the
- * solve runs — leaves for `Stroker` in Phase 6 rather than gaining a channel here.
+ * Continuity comes from §3's authored pairing levels, read through {@link pairingLevel} with
+ * `p = 0` — this solver's ceiling is G2, so a mesh that authors nothing gets G2 asked for and
+ * {@link ClothoidSolverOptions.enableG2} decides whether it is enforced. Level 0 is a corner:
+ * excluded from the solve, then zeroed at both ends. The angle test that used to make that
+ * decision here now lives in `Stroker.markCorners`, because it is inference about the input
+ * and §3 puts inference on the client side of the line.
+ *
+ * The §8 report comes back empty. That is not an omission so much as the shape of the thing:
+ * this iteration has no per-step residual to fit a rate to and no line search to count
+ * backtracks in.
  */
 export class ClothoidSolver implements CurveSolver {
   options: ClothoidSolverOptions;
@@ -501,10 +504,10 @@ export class ClothoidSolver implements CurveSolver {
       const e1 = edge1.curve as Clothoid;
       const e2 = edge2.curve as Clothoid;
 
-      const t1 = new Vector2(edge1.otherVertex(v)).sub(v).normalize();
-      const t2 = new Vector2(edge2.otherVertex(v)).sub(v).normalize();
+      // `p = 0`: this solver's ceiling is G2, so that is the level a bare mesh defaults to.
+      const level = pairingLevel(v, edge1, edge2, 0);
 
-      if (Math.acos(clamp(t1.dot(t2) * 0.99999, -1.0, 1.0)) < opts.cornerThreshold) {
+      if (level < 1) {
         corners.add(v);
         continue;
       }
@@ -515,7 +518,7 @@ export class ClothoidSolver implements CurveSolver {
       // Order matters: the projection runs after the descent within each iteration.
       solver.add(new Constraint("tan_c", tangentConstraint, klst, params, 1.0));
 
-      if (opts.enableG2) {
+      if (opts.enableG2 && level >= 2) {
         solver.add(new Constraint("curv_c", curvatureConstraint, klst, params, 1.0));
       }
     }

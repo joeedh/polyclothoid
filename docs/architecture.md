@@ -147,7 +147,12 @@ Solving is deferred and flag-driven, not eager.
 | --- | --- |
 | `regenSolve()` | sets `RecalcFlags.SOLVE`; cheap, call it freely from edits |
 | `ensureSolve()` | solves only if the flag is set — what a renderer calls each frame |
-| `solve()` | clears the flag and runs `new this.SolverCls(this).solve()` unconditionally |
+| `solve()` | clears the flag, runs the solver unconditionally, returns and keeps its `SolveReport` as `Mesh.report` |
+
+The solver instance is cached on the mesh and reused across solves, rebuilt only when
+`SolverCls` changes. That is not just an allocation saving: a solver may carry state between
+solves — `SPowerSolver` remembers which joints it broke, so hysteresis needs the same
+instance to see the next solve.
 
 Individual curves are lazy the same way: `Curve.update()` marks dirty and recomputation
 happens on the next query.

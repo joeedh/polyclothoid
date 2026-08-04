@@ -559,7 +559,9 @@ describe("Phase 2: SPowerSolver", () => {
   it("stalls rather than diverging on a chain the frozen Jacobian cannot solve", () => {
     const { mesh, edges } = polyline(ZIGZAG);
 
-    const report = new SPowerSolver(mesh, { jacobian: "frozen" }).solve();
+    // `breaks: 0` because Phase 6 would otherwise rescue it by lowering a joint, which is the
+    // right answer to a stall and the wrong thing to measure here.
+    const report = new SPowerSolver(mesh, { jacobian: "frozen", breaks: 0 }).solve();
 
     assert.equal(report.ok, true);
     assert.equal(report.unenforced, 0);

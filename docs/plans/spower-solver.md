@@ -842,7 +842,8 @@ authored level-0 pairings.
 That is a behaviour change, not just a move. Pointer-device polylines have genuine corners
 that the current 72° test catches, so with maximum continuity as the valence-2 default the
 stroker will round them off until the inference is reimplemented client-side. Port it rather
-than deleting it.
+than deleting it. Done in Phase 6: `Stroker.markCorners`, same 72° default, exported as
+`DEFAULT_CORNER_THRESHOLD`, run before `mesh.solve()`.
 
 Fifth, minor but a trap for anyone reading the current code as a template:
 `QUADRATURE_STEPS` (`clothoid.ts:195`, value 19) is a module-private `const`, not an option.
@@ -854,7 +855,7 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
-**Status: 0a, 0b, 1, 2, 3, 4 and 5 are done; both gates passed.** See §14 for the
+**Status: 0a, 0b, 1, 2, 3, 4, 5 and 6 are done; both gates passed.** See §14 for the
 measurements.
 Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
 predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
@@ -968,6 +969,19 @@ that code regardless.
 union-finds; the three stability criteria, the artistic/engineering response split, and
 hysteresis; `λ_v` in the report. Port `cornerThreshold` out to `Stroker` in the same change
 so default behaviour does not regress in between. *Medium.*
+
+Landed as `src/math/qr.ts` (the local pivoted QR §8 asks for and Phase 5 declined to fake),
+`ChainSystem.faults` and `SPowerSolver.solveChain` in `src/curve/spower_solver.ts`, and
+`Stroker.markCorners` in `src/stroke.ts`. All four of Phase 5's declared-and-unemitted rows
+now fire except `ill-conditioned-hessian`, which stays declared for the reason §14 records.
+The port went the whole way: `cornerThreshold` is gone from `ClothoidSolverOptions`, and the
+old solver reads `pairingLevel(v, e1, e2, 0)` instead of measuring an angle, so both solvers
+now take corners as authored data and only `Stroker` infers them from geometry.
+
+The breaking loop re-assembles rather than patching: a fault caps one vertex's level, and the
+chain system is rebuilt from the authored levels plus the caps. That costs an assembly per
+break — bounded by `SPowerSolverOptions.breaks`, three by default — and buys the property
+that a degraded solve is indistinguishable from one whose author asked for the lower level.
 
 **Phase 7 — continuation.** `p = 0 → 2`. Report the iteration-count improvement (§9); the
 phase is only worth keeping if there is one. *Small.*
@@ -1390,6 +1404,51 @@ The thresholds are reporting thresholds, not failure thresholds, per §8's first
 `δ = 1e-2` row is what that distinction buys: the solve converges to `9.1e-12`, better than
 the default run, and still records that the regularization left `3.4e-2` behind. Severity, not
 emission, is what grades it.
+
+### Phase 6 — what breaking costs, and what it catches (`tests/levels.test.ts`)
+
+The four runs that exercise the loop. `attempts` counts chain assemblies, so `1` means
+nothing broke; `degraded` counts joints left below their authored level:
+
+| run | `ok` | attempts | degraded | `maxResidual` | records |
+| --- | --- | --- | --- | --- | --- |
+| zigzag, exact | true | 1 | 0 | `9.9e-11` | none |
+| zigzag, frozen Jacobian | true | 3 | 1 | `3.0e-11` | newton `warning`/`degraded` ×2, `3→2` then `3→1` |
+| hairpin, artistic | true | 4 | 1 | `3.6e-11` | chord, rank, chord — `3→2→1→0` |
+| hairpin, engineering | false | 1 | 0 | — | chord `error`/`refused` ×3 |
+
+The frozen row is the interesting one. Phase 5 measured it stalling at `1.4e-1` with the
+solve reporting `ok`; the same fixture now converges to roundoff by spending two levels at
+one joint. That is §9's trade taken literally — a curve the author did not quite ask for
+beats a visible kink — and it is only available because the wrong Jacobian's failure is
+*local*, which the diagnostics could see and the solver previously could not act on.
+
+**Hysteresis belongs in the thresholds, not in the starting levels.** The first attempt of
+every solve asks for the authored levels, whatever the previous solve broke; what a
+previously-broken joint faces is the stricter *restore* threshold, so keeping the level it
+was just handed takes more than losing it did. The alternative — starting from the levels
+that survived last time — makes delivered geometry a function of solve history, which §8's
+determinism requirement rules out. Under the version that shipped, three consecutive solves
+of the same mesh produce identical residuals and identical breaks; only the *records* differ,
+the first pass emitting the fault condition at `warning` and later passes `level-lowered` at
+`info`, because retaining a break is not news.
+
+**A short iteration budget is not instability.** The divergence criterion originally fired on
+`iterations: 2`, which cost a level for what is a budget rather than a fault. Requiring a
+finite geometric fit fixes it: §8's three signals are fit, stall and line-search failure, and
+a two-step run has no fit to speak of. `ρ = NaN` now means "not measured", not "diverged".
+
+**§8's rank criterion is vacuous at valence 2, and survives being so.** A chain joint's local
+G1 block is a single row, so the column-pivoted ratio is identically `1` unless the row
+vanishes outright — which only the frozen Jacobian's missing blocks can arrange. The
+criterion is really a junction phenomenon and Phase 8 is where it earns its cost; until then
+it is a cheap guard that fires on a NaN row, reading it as ratio `0`, which is the correct
+break signal for the wrong-looking reason.
+
+`ill-conditioned-hessian` remains the one row of §8's table with nothing behind it. It is
+neither free nor localizable: a Hager–Higham estimate costs several solves against a
+factorization the quasi-definite path never forms, and what it returns is one number for a
+whole chain, which is not a *located* record and so cannot drive a break at a joint.
 
 ## 15. References
 

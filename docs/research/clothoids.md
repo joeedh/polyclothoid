@@ -161,7 +161,6 @@ whose defaults reproduce the original exactly:
 |---|---|---|
 | `enableG2` | `false` | register `curv_c` alongside `tan_c` |
 | `progressiveRefinement` | `false` | coarse-to-fine solve, `order = 2 .. KORDER` |
-| `cornerThreshold` | `PI * 0.4` (~72°) | corners sharper than this are excluded from the solve |
 | `iterations` | `55` | passed to `solver.solve` |
 | `relaxation` | `0.7` | ditto |
 
@@ -169,8 +168,8 @@ whose defaults reproduce the original exactly:
 
 1. Coerces every edge's `ks` to `0.001` and marks it dirty.
 2. For each vertex with exactly two edges, adds constraints (see below).
-3. Collects "bad" vertices, where the corner is sharper than `cornerThreshold`, into a
-   `corners` set and skips them.
+3. Collects "bad" vertices, those whose authored pairing level is `0`, into a `corners` set
+   and skips them.
 4. Runs `solver.solve(iterations, relaxation)` — once, or once per order level under
    progressive refinement.
 5. Re-updates all edges, then forces endpoint curvature to zero on **both** edges at every
@@ -208,10 +207,13 @@ whose defaults reproduce the original exactly:
 
 ### Corner handling
 
-Corners sharper than `cornerThreshold` are deliberately left as corners: excluded from the
-solve, then zeroed at both edges' shared end. The threshold used to be a hard-coded magic
-number; it is now an option, though still one global value rather than per-stroke or
-per-vertex.
+Vertices paired at level `0` are deliberately left as corners: excluded from the solve, then
+zeroed at both edges' shared end. Which vertices those are is no longer this solver's
+decision. The angle test used to live here as `cornerThreshold`, a hard-coded magic number
+that became an option; it is now `Stroker.markCorners`, which writes the level onto the
+vertex before `Mesh.solve()` runs. `enableG2` still gates G2 globally, so the level a bare
+mesh gets is `pairingLevel(v, e1, e2, 0)` clamped by that flag — see
+`docs/plans/spower-solver.md` §3 for what the levels mean.
 
 ### Progressive refinement (off by default)
 
