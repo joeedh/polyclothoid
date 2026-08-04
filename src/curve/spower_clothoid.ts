@@ -19,22 +19,22 @@
  *    is what its solver is handed. This curve's solver does not touch `ks` directly at all —
  *    the degrees of freedom live on vertices (§3) and `ks` is derived from them — so there
  *    is nothing to take a view over.
+ *
+ * The basis is nonetheless a *field* rather than a hard-coded import, because §12's control
+ * experiment runs the piecewise-linear profile through this same curve and solver. Everything
+ * below reads `ks` through {@link SPowerClothoid.profile}; the class name records what it is
+ * for, not what it is limited to.
  */
 import { CacheRing, Vector2, clamp } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
 import { type SolvableVertex } from "./mesh_types.js";
-import { sPowerProfile } from "./profile.js";
-import { MIN_CANONICAL_CHORD, type QuadratureOptions, integrateProfile } from "./quadrature.js";
-import { evalSPower, sPowerIntegral, sPowerLength } from "./spower.js";
+import { type CurvatureProfile, profileByName, sPowerProfile } from "./profile.js";
+import { MIN_CANONICAL_CHORD, defaultQuadratureFor, defaultSPowerQuadrature, integrateProfile } from "./quadrature.js";
+import { sPowerLength } from "./spower.js";
 import * as nstructjs from "nstructjs";
 
 /** Default s-power order `p`. Degree `2p + 1`, so cubic curvature and `p + 1 = 2` DOF per vertex. */
 export const SPOWER_ORDER = 1;
-
-export const defaultSPowerQuadrature: QuadratureOptions = {
-  steps      : 19,
-  fourthOrder: true,
-};
 
 const evalRets = new CacheRing(() => new Vector2(), 128);
 const dvRets = new CacheRing(() => new Vector2(), 128);
@@ -47,8 +47,9 @@ export class SPowerClothoid extends Curve {
     this,
     `
 SPowerClothoid {
-  ks    : array(float);
-  order : int;
+  ks          : array(float);
+  order       : int;
+  profileName : string;
 }
 `
   );
@@ -59,12 +60,24 @@ SPowerClothoid {
   /** The `2p + 2` s-power coefficients of the canonical profile `q(u) = L·κ(L·u)`. */
   ks = new Float64Array(sPowerLength(SPOWER_ORDER));
 
+  /**
+   * The basis `ks` is written in.
+   *
+   * Almost always {@link sPowerProfile}. It is a field rather than a hard-coded import for
+   * §12's control experiment, which runs the piecewise-linear profile through this same
+   * curve and solver so that "the basis was the win" can be told apart from "the banded KKT
+   * and the energy were the win". Set it through {@link setProfile}, never on its own —
+   * {@link quadrature} is not independent of it.
+   */
+  profile: CurvatureProfile = sPowerProfile;
+
   /** Arclength `L`, the uniform scale of the similarity transform. `Clothoid`'s `KSCALE`. */
   scale = 1.0;
 
   /** Placement angle. `Clothoid`'s `KTH`. */
   th = 0.0;
 
+  /** How {@link profile} is integrated. Constrained by it — see {@link setProfile}. */
   quadrature = defaultSPowerQuadrature;
 
   recalc = 1;
@@ -81,14 +94,45 @@ SPowerClothoid {
     }
   }
 
-  /** Coefficient count, i.e. the `klen` {@link sPowerProfile} expects. */
-  get klen() {
-    return sPowerLength(this.order);
+  /** The profile's name, which is what {@link STRUCT} stores in place of the profile itself. */
+  get profileName() {
+    return this.profile.name;
   }
 
-  /** Resize `ks` for a new order, keeping whatever coefficients still fit. */
-  setOrder(p: number) {
-    const ks = new Float64Array(sPowerLength(p));
+  set profileName(name: string) {
+    this.setProfile(profileByName(name));
+  }
+
+  /**
+   * Adopt a profile and the quadrature that goes with it, together.
+   *
+   * They travel as a pair because the achievable order is a property of the basis: a profile
+   * with no `d2Curvature` cannot drive the fourth-order terms, and `integrateProfile` throws
+   * rather than quietly dropping them. Setting {@link profile} alone would leave the two
+   * disagreeing until whoever set it remembered the second half.
+   */
+  setProfile(profile: CurvatureProfile, quadrature = defaultQuadratureFor(profile)) {
+    this.profile = profile;
+    this.quadrature = quadrature;
+    this.recalc = 1;
+
+    return this;
+  }
+
+  /** Coefficient count, i.e. the `klen` {@link profile} expects. */
+  get klen() {
+    return this.ks.length;
+  }
+
+  /**
+   * Resize `ks` for a new order, keeping whatever coefficients still fit.
+   *
+   * `count` is the coefficient count, which is `2p + 2` only for the s-power basis: a
+   * sampled profile carries as many samples as it likes over the same `p + 1` derivatives
+   * per vertex. It is the owning {@link ProfileDOF} that knows which.
+   */
+  setOrder(p: number, count = sPowerLength(p)) {
+    const ks = new Float64Array(count);
 
     ks.set(this.ks.subarray(0, Math.min(this.ks.length, ks.length)));
 
@@ -133,7 +177,7 @@ SPowerClothoid {
   _update() {
     this.recalc = 0;
 
-    const end = integrateProfile(sPowerProfile, this.ks, this.klen, 0.0, 1.0, this.quadrature, scratch);
+    const end = integrateProfile(this.profile, this.ks, this.klen, 0.0, 1.0, this.quadrature, scratch);
 
     const chord = this.v1.vectorDistance(this.v2);
     const canonical = Math.max(end.vectorLength(), MIN_CANONICAL_CHORD);
@@ -159,7 +203,7 @@ SPowerClothoid {
     const u = this._param(s);
     const p = evalRets.next().zero();
 
-    integrateProfile(sPowerProfile, this.ks, this.klen, 0.0, u, this.quadrature, p);
+    integrateProfile(this.profile, this.ks, this.klen, 0.0, u, this.quadrature, p);
 
     return p.rot2d(this.th).mulScalar(this.scale).add(this.v1);
   }
@@ -170,7 +214,7 @@ SPowerClothoid {
       this._update();
     }
 
-    const th = sPowerIntegral(this.ks, this.klen, this._param(s)) + this.th;
+    const th = this.profile.integral(this.ks, this.klen, this._param(s)) + this.th;
 
     const ret = dvRets.next();
     ret[0] = Math.cos(th);
@@ -186,8 +230,8 @@ SPowerClothoid {
 
     const u = this._param(s);
 
-    const th = sPowerIntegral(this.ks, this.klen, u) + this.th;
-    const k = evalSPower(this.ks, this.klen, u) / this.scale;
+    const th = this.profile.integral(this.ks, this.klen, u) + this.th;
+    const k = this.profile.curvature(this.ks, this.klen, u) / this.scale;
 
     const ret = dv2Rets.next();
     ret[0] = -Math.sin(th) * k;
@@ -202,12 +246,12 @@ SPowerClothoid {
       this._update();
     }
 
-    return evalSPower(this.ks, this.klen, this._param(s)) / this.scale;
+    return this.profile.curvature(this.ks, this.klen, this._param(s)) / this.scale;
   }
 
   /** Total turning across the segment, `∫₀¹ q du`. Exact, and linear in `ks`. */
   get turning() {
-    return sPowerIntegral(this.ks, this.klen, 1.0);
+    return this.profile.integral(this.ks, this.klen, 1.0);
   }
 
   afterSTRUCT(v1: SolvableVertex, v2: SolvableVertex) {
@@ -216,13 +260,14 @@ SPowerClothoid {
     this.recalc = 1;
   }
 
+  /*
+    `array(float)` reads back as a plain Array, and the coefficient count is whatever was
+    written — `2p + 2` for the s-power basis but a free sample count otherwise.
+  */
   loadSTRUCT(reader: (obj: this) => void) {
     reader(this);
 
-    const ks = new Float64Array(sPowerLength(this.order));
-    ks.set(this.ks.subarray(0, Math.min(this.ks.length, ks.length)));
-
-    this.ks = ks;
+    this.ks = Float64Array.from(this.ks);
     this.recalc = 1;
   }
 }

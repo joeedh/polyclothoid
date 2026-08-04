@@ -33,6 +33,12 @@ the two effects have to be measured separately. §12 phases them so they are: th
 quadrature question is settled with no solver at all, and the solver is written generically
 enough that the piecewise-linear profile can be run through it as a control.
 
+**Measured, and this table is right.** The control ran in Phase 4 and converges in the same
+step counts as the s-power basis on every chain tried — so rows 1 and 2 were solver problems,
+exactly as claimed, and nothing about the convergence result is attributable to the
+representation. Row 3 is the whole of the case, and it is a large one: `400×` accuracy at a
+shared step budget. See §14.
+
 The structural argument, independent of the measurements: twelve piecewise-linear samples
 per edge give a non-smooth profile with far more degrees of freedom than there are
 constraints, no structural relationship between adjacent edges, and no basis-level notion
@@ -837,11 +843,18 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
-**Status: 0a, 0b, 1, 2 and 3 are done; both gates passed.** See §14 for the measurements.
+**Status: 0a, 0b, 1, 2, 3 and 4 are done; both gates passed.** See §14 for the measurements.
 Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
 predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
 of edge orientation. The frozen assembly is retained behind
 `SPowerSolverOptions.jacobian: "frozen"` so §5's claim stays re-measurable.
+
+**Phase 4 came out the way §1 said it would**, which is the useful outcome for a control and
+not the boring one. The piecewise-linear profile converges in the *same* step counts through
+the same solver, so rows 1 and 2 of §1's table are indeed solver problems and the convergence
+result is not evidence for the basis. Row 3 is where the basis pays: roughly `400×` accuracy
+at a shared quadrature budget, and a fourth-order scheme the polyline cannot reach at any
+sampling resolution.
 
 **Phase 0a — the quadrature gate.** A standalone harness, no mesh, no solver, no
 `Clothoid`: fix a coefficient vector, integrate the Taylor scheme at `N` steps, compare
@@ -904,6 +917,13 @@ the Phase 2/3 solver, using §10's generic profile interface. This is what separ
 banded KKT and the energy were the win" from "the basis was the win," and §1 is not settled
 without it. Cheap if §10's abstraction held; if it did not, that is worth knowing too.
 *Small if Phase 2 was written generically.*
+
+Landed as `src/curve/samples.ts`, and §10's abstraction did hold — `ProfileDOF` needed one
+new member (the quadrature, which is a property of the basis rather than of the caller) and
+the matrix helpers had to stop assuming square. The transform is deliberately `S · M_e` with
+`S` the s-power basis sampled at the nodes, so the two runs differ by `S` and by nothing
+else: same unknowns, same energy structure, same constraint, same sparsity. Answer in §14 —
+the convergence is the solver's, the accuracy is the basis's.
 
 **Phase 5 — diagnostics.** The §8 record and the `solve()` signature change. Later than the
 earlier draft placed it, because Phase 3's convergence work is what tells you which
@@ -1228,6 +1248,67 @@ points per edge: `7.8e-10` elbow, `8.0e-7` zigzag, `9.1e-9` spiral, against the 
 version's `4.8e-4`. The residue is the solve tolerance, not an asymmetry. Zoom invariance is
 now exact to roundoff — `3.8e-16` on arclength ratio and `1.3e-15` on coefficients across a
 37× zoom — where §3's dimensionless-profile argument said it should be.
+
+### Phase 4 — the control experiment (`tests/control.test.ts`)
+
+The piecewise-linear profile as a second `ProfileDOF`, with the edge transform
+`T_e = S · M_e` — the s-power transform of §3 with the basis sampled at `m` uniform nodes in
+front of it. Everything else is held: the unknowns are the same vertex blocks, the energy is
+the same `(K + α²M)/C_e³` reassembled with P1 elements, the constraint is the same wrapped
+angle gap, the bandwidth is unchanged. Routing through `M_e` rather than deriving a Hermite
+sampling directly is what makes that literal — the two runs differ by `S` alone.
+
+The constraint row was re-differenced through the substitution before anything else was read
+off it, at all the orientations of Phase 3's harness, and agrees to `< 1e-7`.
+
+Convergence, `p = 1`, `α = 0.1`, tolerance `1e-10`, three orientations each:
+
+| chain | s-power (4 coefficients) | sampled (12 samples) |
+| --- | --- | --- |
+| elbow, FF / RR / mixed | 4 / 4 / 4 | 4 / 4 / 4 |
+| zigzag, F⁴ / R⁴ / mixed | 8 / 8 / 8 | 9 / 9 / 9 |
+| spiral, F⁸ / R⁸ / mixed | 7 / 7 / 7 | 7 / 7 / 7 |
+
+**That is the headline, and it goes against the basis.** One extra step on one chain is not a
+result. The convergence work of Phases 2 and 3 — vertex-owned DOF, the energy, the exact row,
+the direct banded solve — carries over to the old profile unchanged, so none of it is
+evidence for the s-power basis. §1 said as much in its table and declined to claim otherwise;
+the control is what turns that from a caveat into a measurement. Orientation independence and
+`unenforced = 0` carry over too, which is the expected consequence: both are properties of the
+row, and the row is the same code.
+
+What does not carry over is accuracy per unit work. Integrating the same profile
+`q = [2.0, 0.1, 0.6, 0.0]` at the shared budget of nineteen Taylor steps, against a 4000-step
+reference:
+
+| representation | endpoint error at 19 steps |
+| --- | --- |
+| s-power, fourth order | `9.3e-7` |
+| s-power, third order | `3.5e-5` |
+| 12 samples, third order | `3.8e-4` |
+
+`400×`, and it decomposes cleanly. `3.5e-5` of the polyline's error is quadrature and matches
+the s-power third-order figure to two digits — the knots cost nothing here, so
+`clothoids.md` §4's aliasing is a low-step-count effect and not a standing penalty. The
+remaining `3.8e-4` is interpolation: the polyline is not the profile, and rejoining `m`
+samples of a cubic with straight lines loses `O(h²q″)`. Measured across `m = 4 … 48` the bias
+falls at `h^1.9…2.0`, which is that and nothing else.
+
+Neither term can be bought off. To bring the bias under `9.3e-7` by refinement alone needs
+`m ≈ 250`, at which point the run costs `4.3×` the s-power one at `m = 48` already — the
+Jacobian does `m` profile evaluations per step, so cost is linear in the sampling. And it
+still would not get there, because at 19 steps the polyline's own quadrature error is
+`3.5e-5` and the fourth-order terms that would remove it are *unreachable*: `d²q/du²` for a
+polyline is a train of deltas, so `integrateProfile` throws rather than pretending it is zero.
+That is the one place the basis is not merely better but categorically different, and it is
+row 3 of §1's table.
+
+Two smaller findings. Cost at the default resolution is `1.79 ms` against `2.42 ms` per
+zigzag solve, so the control is `35%` slower for `400×` less accuracy. And `G²` continuity
+survives the substitution — worst `|Δκ|` across a joint is `1.6e-12` sampled against
+`2.8e-11` s-power — because sample `0` and sample `m−1` are exactly the Hermite endpoint
+values. Structural continuity is a property of the *DOF layout* of §3, not of the basis, which
+is worth knowing separately from everything above.
 
 ## 15. References
 

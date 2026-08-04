@@ -66,6 +66,7 @@
  * survive, even orders flip. {@link edgeTransform} folds that into its column signs.
  */
 import { type CurvatureProfile, sPowerProfile } from "./profile.js";
+import { type QuadratureOptions, defaultSPowerQuadrature } from "./quadrature.js";
 import { integralWeights, massMatrix, sPowerLength, stiffnessMatrix, taylorToPairs } from "./spower.js";
 
 /** Number of scalars a single vertex owns at order `p`. */
@@ -221,33 +222,102 @@ export function edgeEnergy(p: number, chord: number, alpha: number, out?: Float6
   return e;
 }
 
-/** `out = Bᵀ A B` for square row-major `n × n` matrices. Symmetry of `A` is not assumed. */
-export function congruence(a: ArrayLike<number>, b: ArrayLike<number>, n: number, out?: Float64Array) {
-  const ab = new Float64Array(n * n);
+/*
+  Row-major throughout, with the shape passed alongside rather than carried. Rectangular
+  because §10's profiles need not have as many coefficients as DOF — s-power does, sampling
+  does not.
+*/
 
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
+/** `out = A B` for `A` of `rows × inner` and `B` of `inner × cols`. */
+export function multiply(
+  a: ArrayLike<number>,
+  b: ArrayLike<number>,
+  rows: number,
+  inner: number,
+  cols: number,
+  out?: Float64Array
+) {
+  const r = out ?? new Float64Array(rows * cols);
+
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
       let sum = 0.0;
 
-      for (let k = 0; k < n; k++) {
-        sum += a[i * n + k] * b[k * n + j];
+      for (let k = 0; k < inner; k++) {
+        sum += a[i * inner + k] * b[k * cols + j];
       }
 
-      ab[i * n + j] = sum;
+      r[i * cols + j] = sum;
     }
   }
 
-  const r = out ?? new Float64Array(n * n);
+  return r;
+}
 
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
+/** `out = wᵀ M` for `w` of length `rows` and `M` of `rows × cols`. */
+export function rowTimesMatrix(
+  w: ArrayLike<number>,
+  m: ArrayLike<number>,
+  rows: number,
+  cols: number,
+  out?: Float64Array
+) {
+  const row = out ?? new Float64Array(cols);
+
+  for (let c = 0; c < cols; c++) {
+    let sum = 0.0;
+
+    for (let i = 0; i < rows; i++) {
+      sum += w[i] * m[i * cols + c];
+    }
+
+    row[c] = sum;
+  }
+
+  return row;
+}
+
+/** `out = M v` for `M` of `rows × cols` and `v` of length `cols`. */
+export function matrixTimesVector(
+  m: ArrayLike<number>,
+  v: ArrayLike<number>,
+  rows: number,
+  cols: number,
+  out?: Float64Array
+) {
+  const r = out ?? new Float64Array(rows);
+
+  for (let i = 0; i < rows; i++) {
+    let sum = 0.0;
+
+    for (let c = 0; c < cols; c++) {
+      sum += m[i * cols + c] * v[c];
+    }
+
+    r[i] = sum;
+  }
+
+  return r;
+}
+
+/**
+ * `out = Bᵀ A B`, `cols × cols`, for `A` of `rows × rows` and `B` of `rows × cols`.
+ *
+ * Symmetry of `A` is not assumed.
+ */
+export function congruence(a: ArrayLike<number>, b: ArrayLike<number>, rows: number, cols: number, out?: Float64Array) {
+  const ab = multiply(a, b, rows, rows, cols);
+  const r = out ?? new Float64Array(cols * cols);
+
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < cols; j++) {
       let sum = 0.0;
 
-      for (let k = 0; k < n; k++) {
-        sum += b[k * n + i] * ab[k * n + j];
+      for (let k = 0; k < rows; k++) {
+        sum += b[k * cols + i] * ab[k * cols + j];
       }
 
-      r[i * n + j] = sum;
+      r[i * cols + j] = sum;
     }
   }
 
@@ -264,7 +334,7 @@ export function congruence(a: ArrayLike<number>, b: ArrayLike<number>, n: number
 export function edgeHessian(p: number, frame: EdgeFrame, alpha: number, out?: Float64Array) {
   const n = sPowerLength(p);
 
-  return congruence(edgeEnergy(p, frame.chord, alpha), edgeTransform(p, frame), n, out);
+  return congruence(edgeEnergy(p, frame.chord, alpha), edgeTransform(p, frame), n, n, out);
 }
 
 /**
@@ -288,39 +358,15 @@ export function edgeTurningRow(p: number, frame: EdgeFrame, out?: Float64Array) 
  */
 export function edgePullback(p: number, frame: EdgeFrame, w: ArrayLike<number>, out?: Float64Array) {
   const n = sPowerLength(p);
-  const m = edgeTransform(p, frame);
-  const row = out ?? new Float64Array(n);
 
-  for (let c = 0; c < n; c++) {
-    let sum = 0.0;
-
-    for (let i = 0; i < n; i++) {
-      sum += w[i] * m[i * n + c];
-    }
-
-    row[c] = sum;
-  }
-
-  return row;
+  return rowTimesMatrix(w, edgeTransform(p, frame), n, n, out);
 }
 
 /** The edge's coefficient vector `a_e = M_e · dof`, with `dof` in chain order. */
 export function edgeCoefficients(p: number, frame: EdgeFrame, dof: ArrayLike<number>, out?: Float64Array) {
   const n = sPowerLength(p);
-  const m = edgeTransform(p, frame);
-  const a = out ?? new Float64Array(n);
 
-  for (let i = 0; i < n; i++) {
-    let sum = 0.0;
-
-    for (let c = 0; c < n; c++) {
-      sum += m[i * n + c] * dof[c];
-    }
-
-    a[i] = sum;
-  }
-
-  return a;
+  return matrixTimesVector(edgeTransform(p, frame), dof, n, n, out);
 }
 
 /**
@@ -342,6 +388,15 @@ export interface ProfileDOF {
 
   /** The profile that integrates the coefficients {@link coefficients} produces. */
   readonly profile: CurvatureProfile;
+
+  /**
+   * How that profile should be integrated.
+   *
+   * Not a free choice: a profile without `d2Curvature` cannot drive the fourth-order scheme
+   * at all, so the achievable order is a property of the basis rather than of the caller.
+   * That is half of what §12's control experiment measures.
+   */
+  readonly quadrature: QuadratureOptions;
 
   /** Scalars owned by one vertex at order `p`. */
   blockLength(p: number): number;
@@ -377,8 +432,9 @@ export interface ProfileDOF {
 
 /** The s-power profile as a {@link ProfileDOF}: Hermite blocks of `p + 1` derivatives. */
 export const sPowerDOF: ProfileDOF = {
-  name   : "s-power",
-  profile: sPowerProfile,
+  name      : "s-power",
+  profile   : sPowerProfile,
+  quadrature: defaultSPowerQuadrature,
 
   blockLength,
   coefficientLength: sPowerLength,

@@ -43,6 +43,29 @@ export const defaultQuadratureOptions: QuadratureOptions = {
 };
 
 /**
+ * What the s-power basis is integrated with: the same nineteen steps, fourth order.
+ *
+ * The order is not a free choice. A profile without `d2Curvature` cannot drive the extra
+ * pair of terms at all, so this is the one basis in the codebase that can ask for them —
+ * which is half of what §12's control experiment measures. See §14's Phase 0a table.
+ */
+export const defaultSPowerQuadrature: QuadratureOptions = {
+  steps      : 19,
+  fourthOrder: true,
+};
+
+/**
+ * Nineteen steps, at the highest order the profile can actually drive.
+ *
+ * The step count is a tuning choice and the order is not, so this is the only part of a
+ * `QuadratureOptions` that can be inferred: a profile either has a second derivative or it
+ * does not.
+ */
+export function defaultQuadratureFor(profile: CurvatureProfile): QuadratureOptions {
+  return { steps: 19, fourthOrder: profile.d2Curvature !== undefined };
+}
+
+/**
  * Total turning over `[0, 1]`, i.e. `integral of kappa` — the natural step-schedule
  * currency (`spower-solver.md` §7) and the quantity to hold fixed when comparing profiles.
  */

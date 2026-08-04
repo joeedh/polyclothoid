@@ -23,6 +23,8 @@ export {
   circleArc,
   sPowerProfile,
   bernsteinCurvature,
+  profileByName,
+  registerProfile,
   type CurvatureProfile,
 } from "./profile.js";
 
@@ -49,7 +51,9 @@ export {
 
 export {
   MIN_CANONICAL_CHORD,
+  defaultQuadratureFor,
   defaultQuadratureOptions,
+  defaultSPowerQuadrature,
   integrateProfile,
   integrateProfileJacobian,
   totalTurning,
@@ -68,13 +72,26 @@ export {
   edgePullback,
   edgeTransform,
   edgeTurningRow,
+  matrixTimesVector,
+  multiply,
   referenceLength,
+  rowTimesMatrix,
   sPowerDOF,
   type EdgeFrame,
   type ProfileDOF,
 } from "./blocks.js";
 
-export { SPOWER_ORDER, SPowerClothoid, defaultSPowerQuadrature } from "./spower_clothoid.js";
+export {
+  SAMPLE_COUNT,
+  sampleDOF,
+  sampleEnergy,
+  sampleMatrix,
+  sampleTransform,
+  sampledDOF,
+  trapezoidWeights,
+} from "./samples.js";
+
+export { SPOWER_ORDER, SPowerClothoid } from "./spower_clothoid.js";
 
 export {
   SPowerSolver,

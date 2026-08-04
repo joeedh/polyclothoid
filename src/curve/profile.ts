@@ -177,3 +177,27 @@ export let activeProfile: CurvatureProfile = piecewiseLinear;
 export function setCurvatureProfile(profile: CurvatureProfile) {
   activeProfile = profile;
 }
+
+const registry = new Map<string, CurvatureProfile>();
+
+/**
+ * Register a profile under its own `name`, so it can be recovered from serialized data.
+ *
+ * A curve that carries a profile has to store *which* one, and a function is not a thing
+ * `nstructjs` can write. The name is, and it is already required to be present and
+ * meaningful, so it doubles as the key.
+ */
+export function registerProfile(profile: CurvatureProfile) {
+  registry.set(profile.name, profile);
+
+  return profile;
+}
+
+/** The registered profile of that name, or {@link piecewiseLinear} if there is none. */
+export function profileByName(name: string) {
+  return registry.get(name) ?? piecewiseLinear;
+}
+
+registerProfile(piecewiseLinear);
+registerProfile(circleArc);
+registerProfile(sPowerProfile);

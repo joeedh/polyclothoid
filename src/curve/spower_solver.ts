@@ -234,9 +234,12 @@ export class ChainSystem {
       const curve = e.curve as SPowerClothoid;
 
       curve.update(e);
+      curve.setProfile(dof.profile, dof.quadrature);
 
-      if (curve.order !== this.p) {
-        curve.setOrder(this.p);
+      const count = dof.coefficientLength(this.p);
+
+      if (curve.order !== this.p || curve.klen !== count) {
+        curve.setOrder(this.p, count);
       }
 
       this.curves.push(curve);

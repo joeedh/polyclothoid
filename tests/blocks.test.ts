@@ -455,8 +455,15 @@ describe("vertex blocks: energy and turning", () => {
 
   it("computes BᵀAB", () => {
     // A = [[1,2],[3,4]], B = [[5,6],[7,8]]: AB = [[19,22],[43,50]], BᵀAB = [[396,460],[458,532]].
-    const r = congruence([1, 2, 3, 4], [5, 6, 7, 8], 2);
+    const r = congruence([1, 2, 3, 4], [5, 6, 7, 8], 2, 2);
 
     assert.deepEqual(Array.from(r), [396, 460, 458, 532]);
+  });
+
+  it("computes BᵀAB when B is taller than it is wide", () => {
+    // A = I₃, B = [[1,2],[3,4],[5,6]]: BᵀB = [[35,44],[44,56]].
+    const r = congruence([1, 0, 0, 0, 1, 0, 0, 0, 1], [1, 2, 3, 4, 5, 6], 3, 2);
+
+    assert.deepEqual(Array.from(r), [35, 44, 44, 56]);
   });
 });
