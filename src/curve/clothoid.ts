@@ -1,5 +1,6 @@
 import { CacheRing, Constraint, Solver, Vector2, clamp, fract } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
+import { emptySolveReport } from "./diagnostics.js";
 import { type CurveSolver, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
 import { activeProfile } from "./profile.js";
 import * as nstructjs from "nstructjs";
@@ -459,6 +460,11 @@ function changeOrder(mesh: SolvableMesh, order: number) {
  *
  * Gauss-Seidel: constraints are visited in order and each steps the parameters
  * immediately. See {@link ClothoidSolverOptions} for the parked experiments.
+ *
+ * The §8 report comes back empty. That is not an omission so much as the shape of the
+ * thing: this iteration has no per-step residual to fit a rate to and no line search to
+ * count backtracks in, and its one act of breaking — `cornerThreshold`, decided before the
+ * solve runs — leaves for `Stroker` in Phase 6 rather than gaining a channel here.
  */
 export class ClothoidSolver implements CurveSolver {
   options: ClothoidSolverOptions;
@@ -537,5 +543,7 @@ export class ClothoidSolver implements CurveSolver {
         setEndCurvature(edge.curve as Clothoid, v === edge.v1, 0.0);
       }
     }
+
+    return emptySolveReport();
   }
 }

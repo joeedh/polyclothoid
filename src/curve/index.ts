@@ -3,6 +3,20 @@ export { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVe
 export { chains, walk, type Chain } from "./topology.js";
 
 export {
+  RATE_WINDOW,
+  diagnosticThresholds,
+  emptySolveReport,
+  geometricRate,
+  type Diagnostic,
+  type DiagnosticAction,
+  type DiagnosticCondition,
+  type DiagnosticSeverity,
+  type SolveReport,
+  type SolveTrace,
+  type TraceStep,
+} from "./diagnostics.js";
+
+export {
   Clothoid,
   ClothoidSolver,
   KORDER,
@@ -96,6 +110,7 @@ export { SPOWER_ORDER, SPowerClothoid } from "./spower_clothoid.js";
 export {
   SPowerSolver,
   defaultSPowerSolverOptions,
+  type ChainRun,
   type SPowerSolverOptions,
   type SPowerSolverReport,
 } from "./spower_solver.js";

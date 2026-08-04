@@ -42,11 +42,19 @@
  * without a merit test the coefficients ratchet, reaching `1e+70` by the sixty-fourth pass
  * on a four-edge zigzag before the factorization hands back `NaN`.
  */
-import { BandedSymmetric, type KKTSolveOptions, solveKKT } from "../math/index.js";
+import { BandedSymmetric, type KKTSolveOptions, defaultKKTSolveOptions, solveKKT } from "../math/index.js";
 import { type EdgeFrame, type ProfileDOF, referenceLength, sPowerDOF } from "./blocks.js";
+import {
+  type Diagnostic,
+  RATE_WINDOW,
+  type SolveReport,
+  type TraceStep,
+  diagnosticThresholds,
+  geometricRate,
+} from "./diagnostics.js";
 import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
 import { SPOWER_ORDER, type SPowerClothoid } from "./spower_clothoid.js";
-import { type TransformJacobian, transformJacobian } from "./quadrature.js";
+import { MIN_CANONICAL_CHORD, type TransformJacobian, transformJacobian } from "./quadrature.js";
 import { type Chain, chains } from "./topology.js";
 
 const TAU = Math.PI * 2.0;
@@ -58,6 +66,16 @@ const MIN_RELAXATION = 1e-4;
 /** Signed angle in `(−π, π]`. §4: the residual has to carry a sign and stay differentiable. */
 function wrapAngle(a: number) {
   return a - TAU * Math.round(a / TAU);
+}
+
+function infinityNorm(x: Float64Array) {
+  let worst = 0.0;
+
+  for (const v of x) {
+    worst = Math.max(worst, Math.abs(v));
+  }
+
+  return worst;
 }
 
 export interface SPowerSolverOptions {
@@ -102,6 +120,14 @@ export interface SPowerSolverOptions {
    */
   jacobian: "exact" | "frozen";
 
+  /**
+   * Record a {@link SolveTrace} per chain — §8's per-iteration history.
+   *
+   * Off by default because it is the one part of the diagnostics that allocates per step.
+   * Everything in {@link SPowerSolverReport.diagnostics} is measured either way.
+   */
+  trace: boolean;
+
   kkt: Partial<KKTSolveOptions>;
 }
 
@@ -113,10 +139,11 @@ export const defaultSPowerSolverOptions: SPowerSolverOptions = {
   tolerance : 1e-10,
   dof       : sPowerDOF,
   jacobian  : "exact",
+  trace     : false,
   kkt       : {},
 };
 
-export interface SPowerSolverReport {
+export interface SPowerSolverReport extends SolveReport {
   /** Chains found by {@link chains}, including any that were skipped. */
   chains: number;
 
@@ -135,13 +162,60 @@ export interface SPowerSolverReport {
 
   /** Gauss-Newton steps actually taken, summed over chains. */
   steps: number;
-
-  /** False if any KKT factorization underflowed — `kkt.delta` is too small for the system. */
-  ok: boolean;
 }
 
 function emptyReport(): SPowerSolverReport {
-  return { chains: 0, skippedClosed: 0, unenforced: 0, maxResidual: 0.0, steps: 0, ok: true };
+  return {
+    chains       : 0,
+    skippedClosed: 0,
+    unenforced   : 0,
+    maxResidual  : 0.0,
+    steps        : 0,
+    ok           : true,
+    diagnostics  : [],
+  };
+}
+
+/**
+ * What one chain's {@link ChainSystem.run} measured on its way through, for {@link
+ * ChainSystem.diagnose} to turn into §8 records.
+ *
+ * All of it is a byproduct: the history is the convergence test, the backtracks and the
+ * relaxation floor are the line search, the refinement residual comes back from `solveKKT`,
+ * and the multiplier is read off the solution vector. §8's second rule is what makes the
+ * unconditional measurement of the first rule affordable.
+ */
+export interface ChainRun {
+  steps: number;
+  residual: number;
+
+  /** False if a KKT factorization underflowed. */
+  factored: boolean;
+
+  /**
+   * False if the chain produced nothing usable — a failed factorization, or geometry that
+   * went non-finite. Not a convergence test: a chain that stalls at a visible angle gap has
+   * still produced an answer, and says so through an `error` diagnostic instead.
+   */
+  ok: boolean;
+
+  /** The last {@link RATE_WINDOW} residuals, oldest first — a window, not a history. */
+  history: number[];
+
+  /** Most backtracks any one line search needed. */
+  backtracks: number;
+
+  /** True if a line search ran out of room without improving the merit. */
+  starved: boolean;
+
+  /** Worst `‖Ax − b‖∞` after refinement, over the steps taken. `Infinity` if one failed. */
+  refinement: number;
+
+  /** Largest `|λ_v|` seen. §8's corner evidence — measured here, acted on by nobody. */
+  multiplier: number;
+
+  /** Present only with {@link SPowerSolverOptions.trace} on. */
+  trace?: TraceStep[];
 }
 
 /** `Rᵥ` for every vertex, from chord lengths only — §3, and §5's note that `Rᵥ` is shared. */
@@ -509,15 +583,23 @@ export class ChainSystem {
    * for the duration of one search — only `c` is remeasured, on the actual curves — so the
    * comparison is between two states of the same model.
    */
-  run() {
+  run(): ChainRun {
     const opts = this.options;
     const grad = new Float64Array(this.n);
     const rhs = new Float64Array(this.n);
     const base = new Float64Array(this.n);
 
+    const history: number[] = [];
+    const trace = opts.trace ? ([] as TraceStep[]) : undefined;
+
     let steps = 0;
-    let ok = true;
+    let factored = true;
     let mu = 1.0;
+
+    let backtracks = 0;
+    let starved = false;
+    let refinement = 0.0;
+    let multiplier = 0.0;
 
     this.write();
 
@@ -543,8 +625,10 @@ export class ChainSystem {
 
       const step = solveKKT(this.kkt, rhs, this.rows, opts.kkt);
 
+      refinement = Math.max(refinement, step.residual);
+
       if (!step.ok) {
-        ok = false;
+        factored = false;
         break;
       }
 
@@ -556,6 +640,7 @@ export class ChainSystem {
 
       const start = this.merit(mu);
       let t = opts.relaxation;
+      let cuts = 0;
 
       for (;;) {
         for (let i = 0; i < this.n; i++) {
@@ -565,12 +650,21 @@ export class ChainSystem {
         this.write();
         this.measure();
 
-        if (this.merit(mu) < start || t < MIN_RELAXATION) {
+        if (this.merit(mu) < start) {
+          break;
+        }
+
+        // Out of room rather than out of patience: the direction was not a descent one.
+        if (t < MIN_RELAXATION) {
+          starved = true;
           break;
         }
 
         t *= SHRINK;
+        cuts++;
       }
+
+      backtracks = Math.max(backtracks, cuts);
 
       // `L_e` only moves here, between passes — the coefficients are rebuilt through the
       // updated `M_e` so the next linearization point is a self-consistent one.
@@ -582,9 +676,147 @@ export class ChainSystem {
       residual = this.measure();
 
       steps++;
+
+      const largest = this.largestMultiplier();
+
+      multiplier = Math.max(multiplier, largest);
+
+      if (history.length >= RATE_WINDOW) {
+        history.shift();
+      }
+
+      history.push(residual);
+
+      trace?.push({
+        merit: this.merit(mu),
+        residual,
+        stepNorm     : t * infinityNorm(step.x),
+        maxMultiplier: largest,
+        relaxation   : t,
+        refinement   : step.residual,
+      });
     }
 
-    return { steps, residual, ok };
+    return {
+      steps,
+      residual,
+      factored,
+      ok: factored && Number.isFinite(residual),
+      history,
+      backtracks,
+      starved,
+      refinement,
+      multiplier,
+      trace,
+    };
+  }
+
+  /** `max|λ_v|` over the chain's enforced joints, read off the current solution vector. */
+  largestMultiplier() {
+    let worst = 0.0;
+
+    for (const row of this.rows) {
+      worst = Math.max(worst, Math.abs(this.z[row]));
+    }
+
+    return worst;
+  }
+
+  /**
+   * Turn one run into §8's records: located, typed, and carrying the measurement that
+   * produced them alongside the threshold it crossed.
+   *
+   * Severity says which side of the threshold the *solve* came out on, not which side the
+   * measurement did — a chain can converge slowly (`warning`) or not at all (`error`) on the
+   * same fitted rate, and only the second is a failure. {@link Diagnostic.action} is `"none"`
+   * throughout, because nothing here breaks anything yet; Phase 6 is what gives the solver
+   * something to do about what Phase 5 measures.
+   */
+  diagnose(chain: number, run: ChainRun, into: Diagnostic[]) {
+    const limits = diagnosticThresholds;
+    const opts = this.options;
+
+    for (let i = 0; i < this.curves.length; i++) {
+      const measured = this.curves[i].canonical;
+
+      // `|C(1)| ≤ 1` exactly, the canonical curve having unit arclength. Above it — or not a
+      // number at all — is the quadrature having lost the curve, which is the same fault
+      // arriving from the other side and is worth catching in the same place.
+      const lost = !(measured <= 1.0);
+
+      if (!lost && measured >= limits.chordDegeneracy) {
+        continue;
+      }
+
+      into.push({
+        condition: "chord-degeneracy",
+        severity : lost || measured <= MIN_CANONICAL_CHORD ? "error" : "warning",
+        action   : "none",
+        chain,
+        at  : i,
+        edge: this.chain.edges[i],
+        measured,
+        threshold: limits.chordDegeneracy,
+      });
+    }
+
+    if (!run.factored) {
+      const delta = opts.kkt.delta ?? defaultKKTSolveOptions.delta;
+
+      into.push({
+        condition: "factorization-underflow",
+        severity : "error",
+        action   : "none",
+        chain,
+        at       : -1,
+        measured : delta,
+        threshold: delta,
+      });
+    }
+
+    const rate = geometricRate(run.history);
+
+    // Negated rather than `>=`, so a residual that went non-finite counts as not converged.
+    const stalled = run.steps >= opts.iterations && !(run.residual < opts.tolerance);
+
+    if (stalled || rate >= limits.newtonRate) {
+      into.push({
+        condition: "newton-not-converging",
+        severity : stalled ? "error" : "warning",
+        action   : "none",
+        chain,
+        at       : -1,
+        measured : rate,
+        threshold: limits.newtonRate,
+      });
+    }
+
+    if (run.starved || run.backtracks >= limits.lineSearch) {
+      into.push({
+        condition: "line-search-failing",
+        severity : run.starved ? "error" : "warning",
+        action   : "none",
+        chain,
+        at       : -1,
+        measured : run.backtracks,
+        threshold: limits.lineSearch,
+      });
+    }
+
+    // `Infinity` here is the failed factorization, which has its own record above.
+    if (run.refinement > limits.refinement && Number.isFinite(run.refinement)) {
+      into.push({
+        condition: "refinement-not-converging",
+        severity : "warning",
+        action   : "none",
+        chain,
+        at       : -1,
+        measured : run.refinement,
+        threshold: limits.refinement,
+      });
+    }
+
+    return into;
   }
 
   /**
@@ -659,7 +891,15 @@ export class SPowerSolver implements CurveSolver {
     const report = emptyReport();
     const refs = referenceLengths(this.mesh);
 
+    if (this.options.trace) {
+      report.traces = [];
+    }
+
+    // Skipped chains take an index too, so the diagnostic's `chain` is a position and not a rank.
+    let index = -1;
+
     for (const chain of chains(this.mesh)) {
+      index++;
       report.chains++;
 
       if (chain.closed) {
@@ -668,12 +908,18 @@ export class SPowerSolver implements CurveSolver {
       }
 
       const system = new ChainSystem(chain, refs, this.options);
-      const result = system.run();
+      const run = system.run();
 
-      report.steps += result.steps;
+      report.steps += run.steps;
       report.unenforced += system.unenforced();
-      report.maxResidual = Math.max(report.maxResidual, result.residual);
-      report.ok &&= result.ok;
+      report.maxResidual = Math.max(report.maxResidual, run.residual);
+      report.ok &&= run.ok;
+
+      system.diagnose(index, run, report.diagnostics);
+
+      if (run.trace) {
+        report.traces?.push({ chain: index, steps: run.trace });
+      }
     }
 
     this.report = report;

@@ -1,5 +1,6 @@
 import { CacheRing, Vector2, clamp, fract, type VecLike } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
+import { emptySolveReport } from "./diagnostics.js";
 import { type CurveSolver, type SolvableMesh } from "./mesh_types.js";
 import { walk } from "./topology.js";
 import * as nstructjs from "nstructjs";
@@ -258,5 +259,7 @@ export class BezierSolver implements CurveSolver {
 
       curve.update();
     }
+
+    return emptySolveReport();
   }
 }

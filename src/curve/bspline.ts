@@ -1,5 +1,6 @@
 import { CacheRing, Vector2, clamp } from "../math/index.js";
 import { Curve, type Canvas2DLike, type CurveEdge } from "./curve.js";
+import { emptySolveReport } from "./diagnostics.js";
 import { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
 import { walk } from "./topology.js";
 import * as nstructjs from "nstructjs";
@@ -385,7 +386,12 @@ BSpline {
   }
 }
 
-/** B-splines are placed entirely by {@link BSpline.init}; there is nothing to iterate. */
+/**
+ * B-splines are placed entirely by {@link BSpline.init}; there is nothing to iterate.
+ *
+ * Nothing to diagnose either — there is no iteration to stall and no transform to degenerate
+ * — so the §8 report is empty by construction rather than by omission.
+ */
 export class BSplineSolver implements CurveSolver {
   constructor(public mesh: SolvableMesh) {}
 
@@ -393,5 +399,7 @@ export class BSplineSolver implements CurveSolver {
     for (const e of this.mesh.edges) {
       e.curve.init(e);
     }
+
+    return emptySolveReport();
   }
 }

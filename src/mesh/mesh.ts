@@ -1,5 +1,12 @@
 import { IDGen, Vector3, Vector4, applyVec3Mixin, listRemove, type VecLike, type Vec3Mixin } from "../math/index.js";
-import { Clothoid, ClothoidSolver, type Curve, type CurveSolver, type SolvableMesh } from "../curve/index.js";
+import {
+  Clothoid,
+  ClothoidSolver,
+  type Curve,
+  type CurveSolver,
+  type SolvableMesh,
+  emptySolveReport,
+} from "../curve/index.js";
 import * as nstructjs from "nstructjs";
 
 export const MeshTypes = {
@@ -553,6 +560,9 @@ mesh.Mesh {
 
   recalc = RecalcFlags.SOLVE;
 
+  /** What the last {@link solve} reported. Not serialized — it describes a run, not a document. */
+  report = emptySolveReport();
+
   CurveCls: CurveConstructor = Clothoid;
   SolverCls: CurveSolverConstructor = ClothoidSolver;
 
@@ -618,12 +628,18 @@ mesh.Mesh {
     return this;
   }
 
+  /**
+   * Run {@link SolverCls} over this mesh and hand back its §8 report.
+   *
+   * Also kept on {@link report}, because {@link ensureSolve} is the path most callers take
+   * and it has nowhere to return a value to.
+   */
   solve() {
     this.recalc &= ~RecalcFlags.SOLVE;
 
-    new this.SolverCls(this).solve();
+    this.report = new this.SolverCls(this).solve();
 
-    return this;
+    return this.report;
   }
 
   /** Replace every edge's curve with a fresh instance of `CurveCls` and re-solve. */

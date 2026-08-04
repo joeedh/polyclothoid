@@ -1,5 +1,6 @@
 import { type Vector2 } from "../math/index.js";
 import { type Curve, type CurveEdge, type CurveVertex } from "./curve.js";
+import { type SolveReport } from "./diagnostics.js";
 
 /**
  * What the per-curve-type solvers need from a mesh.
@@ -33,5 +34,12 @@ export interface SolvableMesh<C extends Curve = Curve> {
 
 /** Fits every curve in a mesh so they agree at shared vertices. */
 export interface CurveSolver {
-  solve(): void;
+  /**
+   * Solve, and hand back what happened — `docs/plans/spower-solver.md` §8.
+   *
+   * The report is the only channel through which a caller can tell an authored break from a
+   * solver bail-out, so it is a return value rather than a field: a solver that quietly
+   * degrades and is never asked about it produces a model that looks right and is not.
+   */
+  solve(): SolveReport;
 }

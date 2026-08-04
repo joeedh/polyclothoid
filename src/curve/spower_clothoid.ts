@@ -77,6 +77,20 @@ SPowerClothoid {
   /** Placement angle. `Clothoid`'s `KTH`. */
   th = 0.0;
 
+  /**
+   * `|C(1)|` of the canonical curve, before the {@link MIN_CANONICAL_CHORD} clamp.
+   *
+   * Its reciprocal is `L_e / C_e`, so it falls towards zero exactly as the segment closes on
+   * itself and the similarity transform stops being well-conditioned. §8's chord-degeneracy
+   * measurement, kept unclamped because the clamped value cannot say how far past it went.
+   *
+   * Bounded above by `1`, the canonical curve having unit arclength — but only for the exact
+   * integral. The quadrature's truncation terms carry `k²` and `k³`, so a coefficient vector
+   * that has run away produces a value far above `1` rather than a saturated one, which is
+   * what makes the upper bound worth checking as well as the lower.
+   */
+  canonical = 1.0;
+
   /** How {@link profile} is integrated. Constrained by it — see {@link setProfile}. */
   quadrature = defaultSPowerQuadrature;
 
@@ -180,9 +194,10 @@ SPowerClothoid {
     const end = integrateProfile(this.profile, this.ks, this.klen, 0.0, 1.0, this.quadrature, scratch);
 
     const chord = this.v1.vectorDistance(this.v2);
-    const canonical = Math.max(end.vectorLength(), MIN_CANONICAL_CHORD);
 
-    this.scale = chord / canonical;
+    this.canonical = end.vectorLength();
+
+    this.scale = chord / Math.max(this.canonical, MIN_CANONICAL_CHORD);
 
     const th1 = Math.atan2(this.v2[1] - this.v1[1], this.v2[0] - this.v1[0]);
     const th2 = Math.atan2(end[1], end[0]);

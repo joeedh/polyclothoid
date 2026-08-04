@@ -643,6 +643,10 @@ A diagnostic is a located, typed record, not a boolean: **where** (vertex, edge,
 | level lowered | the solve record | artistic mode only; engineering mode refuses instead |
 | large multiplier | `λ_v` | not a fault — corner evidence for the client (above) |
 
+Row 1 is two-sided, which the drafted description misses: the canonical chord is bounded
+*above* by `1` as well, the canonical curve having unit arclength. Only the exact integral
+respects that, so a value over it is a broken solve rather than a tight segment — see §14.
+
 Three rules make these useful rather than decorative:
 
 1. **Measure unconditionally, not only on failure.** A slow convergence rate is not a fault
@@ -786,6 +790,13 @@ at, and the fix — hoisting the table to something that outlives the solver ins
 additive, so it is deferred rather than designed around. Revisit in Phase 5, when the
 diagnostics channel gives a natural place to hang persistent solver state.
 
+Revisited in Phase 5, and the premise was wrong: the channel that landed is a `SolveReport`
+*returned* from `solve()`, so it is per-solve by construction and outlives nothing. What it
+did establish is where such state would go — `Mesh.report` holds the last report on the mesh
+rather than on the solver instance, and a block cache would hang there the same way, keyed by
+vertex and invalidated by `RecalcFlags.SOLVE`. Still additive, still deferred; the open
+question is now placement-free and only about invalidation.
+
 Second: `SolvableVertex` needs pairing-and-level access, and the chain decomposition of §5
 has to be computable through the structural interface without reaching into `mesh/`. The
 general-graph solver walks `v.edges` and the authored pairings rather than `otherEdge`.
@@ -843,7 +854,8 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
-**Status: 0a, 0b, 1, 2, 3 and 4 are done; both gates passed.** See §14 for the measurements.
+**Status: 0a, 0b, 1, 2, 3, 4 and 5 are done; both gates passed.** See §14 for the
+measurements.
 Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
 predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
 of edge orientation. The frozen assembly is retained behind
@@ -928,6 +940,29 @@ the convergence is the solver's, the accuracy is the basis's.
 **Phase 5 — diagnostics.** The §8 record and the `solve()` signature change. Later than the
 earlier draft placed it, because Phase 3's convergence work is what tells you which
 measurements are actually diagnostic. *Medium.*
+
+Landed as `src/curve/diagnostics.ts`, and the late placement paid: every threshold in it is
+calibrated against a Phase 3 or Phase 4 run rather than guessed. `CurveSolver.solve()` now
+returns a `SolveReport` — the three legacy solvers return an empty one, `Mesh.solve()`
+returns it and keeps it as `Mesh.report`.
+
+Five of §8's eight rows are emitted; four are declared and left unemitted. Three of those
+four are the two measurements §8 admits are not free (`g1-rank-deficiency`,
+`ill-conditioned-hessian`) plus the outcome of acting on them (`level-lowered`), and acting
+is Phase 6's job. The fourth, `large-multiplier`, is Phase 6 for the opposite reason: §8 is
+explicit that `|λ_v|` is corner evidence for the client and not something the solver may act
+on, so it belongs with the client-facing half that Phase 6 builds. `TraceStep.maxMultiplier`
+carries the number in the meantime, for anyone tracing.
+
+The two unimplemented estimates deserve their reasons recorded, since several cheaper
+substitutes look adequate and are not. Watching pivot magnitudes during the global `LDLᵀ` is
+not a rank test — §8 cites Kahan's matrix, and the factorization is of `H` with `J` in the
+off-diagonal block, so a small pivot does not localize to a node anyway. A Hager–Higham
+1-norm condition estimate wants a factorization of the `(1,1)` block alone, which the
+quasi-definite solve never forms. And a per-element condition number misses the inter-element
+scaling disparity that §5's Ruiz equilibration exists to fix, so it would read healthy
+exactly where `H` is worst. Both want the local pivoted QR §8 asks for, and Phase 6 needs
+that code regardless.
 
 **Phase 6 — levels and stability breaking.** Authored pairing levels with the `p + 2`
 union-finds; the three stability criteria, the artistic/engineering response split, and
@@ -1309,6 +1344,52 @@ survives the substitution — worst `|Δκ|` across a joint is `1.6e-12` sampled
 `2.8e-11` s-power — because sample `0` and sample `m−1` are exactly the Hermite endpoint
 values. Structural continuity is a property of the *DOF layout* of §3, not of the basis, which
 is worth knowing separately from everything above.
+
+### Phase 5 — what the diagnostics caught (`tests/diagnostics.test.ts`)
+
+The calibration run, over the Phase 2/3 fixtures. `at` is the located index, `−1` for a
+chain-level record; `measured` is in the units of the row's threshold:
+
+| run | `ok` | steps | `maxResidual` | records |
+| --- | --- | --- | --- | --- |
+| zigzag, default | true | 8 | `9.9e-11` | none |
+| zigzag, frozen Jacobian | true | 100 | `1.4e-1` | newton `error` (ρ = 1.00), line-search `error` (14) |
+| zigzag, `δ = 1e-2`, refinement off | true | 8 | `9.1e-12` | refinement `warning` (`3.4e-2`) |
+| zigzag, `iterations: 2` | true | 2 | `1.9e-3` | newton `error` (ρ = NaN) |
+| hairpin, `dy = 0.1` | true | 10 | `0.0` | chord `error` ×3, newton `warning`, refinement `warning` |
+| hairpin, `dy = 0.02` | false | 100 | NaN | chord `error` ×3, newton `error`, line-search `error` |
+
+Three things came out of building it that were not in §8.
+
+**The canonical chord is bounded above, and the bound is a free breakdown detector.** §8
+reads the measurement one way — down towards closure, `0.05` being twenty times the chord —
+but `|C(1)| ≤ 1` holds exactly for the canonical curve, which has unit arclength by
+construction. Only for the *exact* integral: the quadrature's truncation terms carry `k²` and
+`k³`, so a coefficient vector that has run away produces a value far above `1` rather than a
+saturated one. That is what the `dy = 0.1` row is. Every joint constraint is satisfied to
+roundoff, so `maxResidual` is exactly `0.0` and the convergence test passes in ten steps —
+a solve reporting success having produced `canonical = 2e145` and no curve at all. Reading the
+bound from both sides turns it into three located `error` records at no cost. Deep closure is
+still the calibrated end of the scale: sweeping a hand-set profile `q = [c, c, c, c]` upward,
+the measurement falls from `9.4e-1` at `c = 1` to `3.5e-2` at `c = 5`, where the segment has
+curled far enough to bring its endpoints back together.
+
+**A non-finite residual has to be written as a negation.** `residual >= tolerance` is false
+for NaN, so the obvious stall test silently calls a destroyed solve converged. Written as
+`!(residual < tolerance)` it is true for NaN, which also closes the gap where `ok` is false
+and nothing says why: the same comparison drives the iteration loop, so a NaN residual always
+runs to the cap and always emits at least one `error`.
+
+**`ok` wants to be narrower than "the factorization held".** Splitting the per-chain record
+into `factored` and `ok = factored && Number.isFinite(residual)` is what makes the frozen row
+above read `true` — it stalls at a visible angle gap, which is a bad answer and not a missing
+one — while the `dy = 0.02` row reads `false`. Non-convergence is an `error` diagnostic, never
+an `ok` of false.
+
+The thresholds are reporting thresholds, not failure thresholds, per §8's first rule, and the
+`δ = 1e-2` row is what that distinction buys: the solve converges to `9.1e-12`, better than
+the default run, and still records that the regularization left `3.4e-2` behind. Severity, not
+emission, is what grades it.
 
 ## 15. References
 
