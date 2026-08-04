@@ -244,7 +244,7 @@ the fixed entries are kept because several describe traps that are easy to reint
 | `linearCurvature` guarded its interpolation with `i2 < klen - 1`, so the last interval was flat at `ks[klen-2]` and **`ks[klen-1]` was never read**, while `integral` ramped to it. The two profile members described different functions | Fixed — `i2 <= klen - 1`. This is the defect that cost the integrator two orders of convergence (§4). |
 | Both members computed `t = fract(i1)` from the *unrounded* index and then indexed with `~~(i1 + 1e-5)`, pairing a `t` near 1 with an `i1` already past the knot — a spurious jump of one full sample on a 1e-5-wide window below every knot | Fixed. `t` is now derived from the same `i1` used to index, which makes the boundary continuous and removes the need for the snapping epsilon at all. |
 | `circleArc.curvature` indexes with `~~(s·(klen−1))`, i.e. intervals of width `1/(klen−1)`, but `circleArc.integral` accumulates with `ds = 1/klen`. The two disagree by exactly `(klen−1)/klen` — a systematic 8.3% error in θ at `klen = 12` | **Won't fix.** Measured, not fixed: it is an unused code path, and the profile is slated for removal along with the b-spline curve type. §3 describes it as complete and switchable; it is neither, and it should not be used as a reference shape for quadrature measurements in the meantime. |
-| `curvatureConstraint` sets `flip = isV1e1 !== isV1e2` (`clothoid.ts:530`) while `tangentConstraint` negates when `isV1e1 === isV1e2` (`clothoid.ts:490`) — opposite tests for the same question, whether the two edges traverse the vertex in the same direction. When both edges have `v` as their `v1` the through-path traverses `e1` backwards and `κ` must flip, which the tangent version does and the curvature version does not | **Open.** The correct line is `const flip = isV1e1 === isV1e2;`. Derived independently twice from the code, not yet verified at runtime. Only reachable when `enableG2` is `true`, which is off by default, so it is unexercised. Fixing it inverts behaviour for anyone who has enabled G2. |
+| `curvatureConstraint` sets `flip = isV1e1 !== isV1e2` (`clothoid.ts:530`) while `tangentConstraint` negates when `isV1e1 === isV1e2` (`clothoid.ts:490`) — opposite tests for the same question, whether the two edges traverse the vertex in the same direction. When both edges have `v` as their `v1` the through-path traverses `e1` backwards and `κ` must flip, which the tangent version does and the curvature version does not | **Fixed** — `const flip = isV1e1 === isV1e2;`. Confirmed at runtime by `tests/joint.test.ts`, which solves the same three-point chain in all four edge orientations and reads the joint curvature in world space: the G2 residual went from `−2.5e-2` to `−3.1e-4` and became uniform across configurations. The two tests are exact negations, so the rule was inverted in every configuration, not two of them. Only reachable when `enableG2` is `true`, which is off by default, so it was unexercised; the fix inverts behaviour for anyone who had enabled G2. |
 
 The two fixed `piecewiseLinear` defects survived the TypeScript port unchanged; they are
 original defects, not port regressions. `piecewiseLinear.integral` is now the exact integral of
@@ -253,12 +253,21 @@ comment states and the thing §3 warns is invisible in a curvature plot when bro
 
 The first of those also made `enableG2` partly fictional: `endCurvature(e, false)` reads
 `ks[order - 1]`, so at every `v2` end the G2 projection and the corner-zeroing pass were
-both writing a value that had no effect on the geometry. Together with the open `flip`
-entry, that is two independent reasons the G2 path has never done what it claims — worth
-knowing before turning it on. `docs/plans/spower-solver.md` retires `enableG2` as a flag
-entirely — G2 is the floor of its continuity ladder rather than an option — but settling
-the `flip` question at runtime is Phase 1 of that plan, since every higher rung depends on
-the same orientation convention.
+both writing a value that had no effect on the geometry. Together with the `flip` entry,
+that is two independent reasons the G2 path had never done what it claims. Both are now
+fixed, and `enableG2` reaches G2 at a joint for the first time — though only to about
+`3e-4` in world curvature, which is the Kaczmarz sweep's own convergence level rather than
+anything about the constraint. `docs/plans/spower-solver.md` retires `enableG2` as a flag
+entirely: G2 is the floor of its continuity ladder rather than an option.
+
+One thing `tests/joint.test.ts` measures in passing is worth recording, because it bears on
+that plan's §5. The solved geometry is only orientation-invariant to about `1.7e-4` —
+reversing an edge changes the answer by roughly the same amount as the solver's residual.
+That is inherent to the sweep rather than a defect: `derivative(0)` depends on the
+curvature samples only through `KTH` while `derivative(length)` depends on all of them, so
+reversing an edge genuinely changes the sensitivity structure the descent sees. It is also
+why that test does *not* detect the `flip` bug — the deviation was `1.68e-4` with the wrong
+sign rule and `1.65e-4` with the right one, the G2 projection barely moving the shape.
 
 Live gaps, as opposed to defects:
 

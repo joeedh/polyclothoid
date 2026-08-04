@@ -21,13 +21,14 @@
     "build": "node tools/build.mjs",
     "build:site": "node tools/build.mjs --minify && node tools/site.mjs",
     "serve": "node tools/serve.mjs",
+    "test": "node tools/test.mjs",
     "typecheck": "tsgo --noEmit",
     "types": "tsgo --emitDeclarationOnly --declaration --outDir dist/types",
-    "format": "prettier --write \"src/**/*.ts\" \"tools/**/*.mjs\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"tools/**/*.mjs\"",
-    "lint": "eslint src tools",
-    "lint:fix": "eslint src tools --fix",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check"
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"tools/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"tools/**/*.mjs\"",
+    "lint": "eslint src tests tools",
+    "lint:fix": "eslint src tests tools --fix",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test"
   },
   "dependencies": {
     "nstructjs": "^0.8.7"

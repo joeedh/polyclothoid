@@ -1,6 +1,7 @@
-import { CacheRing, Constraint, Solver, Vector2, binomial, clamp, fract } from "../math/index.js";
+import { CacheRing, Constraint, Solver, Vector2, clamp, fract } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
 import { type CurveSolver, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { activeProfile } from "./profile.js";
 import * as nstructjs from "nstructjs";
 
 /*
@@ -53,139 +54,6 @@ export const KOFFX = 18;
 export const KOFFY = 19;
 export const KARCSCALE = 20;
 export const KTOT = 21;
-
-/**
- * How a curvature profile is sampled between its control values.
- *
- * The three members must be mutually consistent: `curvature` is the profile, `dCurvature`
- * its derivative, and `integral` its exact integral from 0 to s. Getting `integral` wrong
- * bends the curve without any visible error in the curvature plot, so prefer exact
- * integrals over numeric ones.
- */
-export interface CurvatureProfile {
-  readonly name: string;
-  dCurvature(ks: Float64Array, klen: number, s: number): number;
-  curvature(ks: Float64Array, klen: number, s: number): number;
-  integral(ks: Float64Array, klen: number, s: number): number;
-}
-
-/*
-  `t` is derived from the same `i1` used to index, so the piece boundary is continuous and
-  needs no snapping epsilon. Deriving it independently (`fract` of the unrounded index)
-  pairs a t near 1 with an i1 already bumped past the knot.
-*/
-function linearCurvature(ks: Float64Array, klen: number, s: number) {
-  const si = s * (klen - 1);
-  const i1 = ~~si;
-  const i2 = i1 + 1;
-
-  if (i2 <= klen - 1) {
-    return ks[i1] + (ks[i2] - ks[i1]) * clamp(si - i1, 0.0, 1.0);
-  }
-
-  return ks[i1];
-}
-
-/** Exact integral of a linear ramp from `a` to `b` over `[0, s]`, with s in `[0, 1]`. */
-function rampIntegral(a: number, b: number, s: number) {
-  return -((s - 2.0) * a - b * s) * s * 0.5;
-}
-
-/**
- * Piecewise-linear curvature: interpolate linearly between samples.
- *
- * This is the profile the solver actually runs on. The integral is computed exactly by
- * trapezoid accumulation rather than by quadrature, so it carries no step error.
- */
-export const piecewiseLinear: CurvatureProfile = {
-  name: "piecewise-linear",
-
-  curvature: linearCurvature,
-
-  dCurvature(ks, klen, s) {
-    const df = 0.00001;
-
-    return (linearCurvature(ks, klen, s + df) - linearCurvature(ks, klen, s)) / df;
-  },
-
-  integral(ks, klen, s) {
-    const klen2 = klen - 1;
-
-    const si = s * klen2;
-    const i1 = ~~si;
-    const i2 = clamp(i1 + 1, 0, klen2);
-
-    let sum = 0.0;
-
-    for (let i = 0; i < i1; i++) {
-      sum += rampIntegral(ks[i], ks[i + 1], 1.0) / klen2;
-    }
-
-    if (i2 !== i1) {
-      sum += rampIntegral(ks[i1], ks[i2], clamp(si - i1, 0.0, 1.0)) / klen2;
-    }
-
-    return sum;
-  },
-};
-
-/**
- * Piecewise-constant curvature — a chain of circular arcs.
- *
- * Kept as a switchable alternative rather than deleted: comparing clothoid output against
- * arc output on identical input is part of what this project is for.
- */
-export const circleArc: CurvatureProfile = {
-  name: "circle-arc",
-
-  dCurvature() {
-    return 0.0;
-  },
-
-  curvature(ks, klen, s) {
-    return ks[~~(s * (klen - 1))];
-  },
-
-  integral(ks, klen, s) {
-    let si = s * (klen - 1);
-    const t = fract(si);
-
-    si = ~~si;
-
-    const ds = 1.0 / klen;
-    let sum = 0.0;
-
-    for (let i = 0; i < si; i++) {
-      sum += ks[i] * ds;
-    }
-
-    return sum + t * ks[si] * ds;
-  },
-};
-
-/**
- * Bernstein-basis curvature profile.
- *
- * Incomplete: the integral is not derived, so this cannot drive `evaluate`. path.ux's
- * original also failed to weight the basis functions by `ks[i]` at all, which made it a
- * constant-1 profile regardless of input. Weighted correctly here, but still parked.
- */
-export function bernsteinCurvature(ks: Float64Array, klen: number, s: number) {
-  let sum = 0.0;
-
-  for (let i = 0; i < klen; i++) {
-    sum += ks[i] * binomial(klen - 1, i) * Math.pow(s, i) * Math.pow(1.0 - s, klen - 1 - i);
-  }
-
-  return sum;
-}
-
-/** Which profile the clothoid integrator uses. Swap to compare formulations. */
-export let activeProfile: CurvatureProfile = piecewiseLinear;
-
-export function setCurvatureProfile(profile: CurvatureProfile) {
-  activeProfile = profile;
-}
 
 const quadratureRets = new CacheRing(() => new Vector2(), 128);
 const evalRets = new CacheRing(() => new Vector2(), 128);
@@ -527,7 +395,12 @@ function curvatureConstraint(params: JointParams) {
   const scale1 = e1.ks[KSCALE];
   const scale2 = e2.ks[KSCALE];
 
-  const flip = isV1e1 !== isV1e2;
+  /*
+    Both edges parameterized away from `v` (or both toward it) means the through-path walks
+    one of them backwards, which negates its signed curvature. Matches the rule
+    `tangentConstraint` uses. See `tests/joint.test.ts`.
+  */
+  const flip = isV1e1 === isV1e2;
 
   let k1 = endCurvature(e1, isV1e1) / scale1;
   let k2 = endCurvature(e2, isV1e2) / scale2;

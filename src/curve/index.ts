@@ -1,6 +1,6 @@
 export { Curve, type Canvas2DLike, type CanvasPaint, type CurveEdge, type CurveVertex } from "./curve.js";
 export { type CurveSolver, type SolvableEdge, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
-export { walk } from "./topology.js";
+export { chains, walk, type Chain } from "./topology.js";
 
 export {
   Clothoid,
@@ -12,15 +12,76 @@ export {
   KOFFY,
   KARCSCALE,
   KTOT,
+  defaultClothoidSolverOptions,
+  type ClothoidSolverOptions,
+} from "./clothoid.js";
+
+export {
   activeProfile,
   setCurvatureProfile,
   piecewiseLinear,
   circleArc,
+  sPowerProfile,
   bernsteinCurvature,
-  defaultClothoidSolverOptions,
   type CurvatureProfile,
-  type ClothoidSolverOptions,
-} from "./clothoid.js";
+} from "./profile.js";
+
+export {
+  MAX_SPOWER_ORDER,
+  differentiateSPower,
+  differentiationMatrix,
+  evalSPower,
+  hik,
+  integralWeights,
+  integrateSPower,
+  massMatrix,
+  pairsToTaylor,
+  reverseCurvature,
+  reverseSPower,
+  sPowerCurvature2,
+  sPowerDerivative,
+  sPowerIntegral,
+  sPowerLength,
+  sPowerOrder,
+  stiffnessMatrix,
+  taylorToPairs,
+} from "./spower.js";
+
+export {
+  MIN_CANONICAL_CHORD,
+  defaultQuadratureOptions,
+  integrateProfile,
+  integrateProfileJacobian,
+  totalTurning,
+  transformJacobian,
+  type QuadratureOptions,
+  type TransformJacobian,
+} from "./quadrature.js";
+
+export {
+  blockLength,
+  congruence,
+  edgeCoefficients,
+  edgeDOFLength,
+  edgeEnergy,
+  edgeHessian,
+  edgePullback,
+  edgeTransform,
+  edgeTurningRow,
+  referenceLength,
+  sPowerDOF,
+  type EdgeFrame,
+  type ProfileDOF,
+} from "./blocks.js";
+
+export { SPOWER_ORDER, SPowerClothoid, defaultSPowerQuadrature } from "./spower_clothoid.js";
+
+export {
+  SPowerSolver,
+  defaultSPowerSolverOptions,
+  type SPowerSolverOptions,
+  type SPowerSolverReport,
+} from "./spower_solver.js";
 
 export { CubicBezier, BezierSolver, cubic } from "./bezier.js";
 export { BSpline, BSplinePoint, BSplineSolver, BSplineRecalc, dbasis } from "./bspline.js";

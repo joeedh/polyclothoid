@@ -17,6 +17,7 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 | Task | Command |
 | --- | --- |
 | Typecheck | `pnpm typecheck` (native `tsgo`, not `tsc`) |
+| Test | `pnpm test` (esbuild-bundles `tests/**/*.test.ts`, then `node --test`) |
 | Bundle | `pnpm build` (esbuild) |
 | Dev server | `pnpm serve` (esbuild's own HTTP server, port 8080) |
 | Pages bundle | `pnpm build:site` (minified build, then assemble `site/`) |

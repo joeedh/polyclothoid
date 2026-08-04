@@ -128,11 +128,21 @@ An edge's own coefficient vector is a linear function of its two endpoint blocks
 a_e = M_e · [ block(v1) ; block(v2) ]
 ```
 
-`M_e` composes three things, all constant because all three depend only on input geometry:
-the rescale from `Rᵥ` to `C_e`, an orientation sign, and the triangular `h(i,k)` map from
-Taylor data to s-power pairs (`spower.md` §5). Note that `h` mixes both endpoints, so
-`a_k⁰` depends on both blocks — but never on a third, so each edge couples exactly two
-adjacent vertex blocks.
+`M_e` composes three things: the rescale from `Rᵥ` to the edge's own length, an orientation
+sign, and the triangular `h(i,k)` map from Taylor data to s-power pairs (`spower.md` §5).
+Note that `h` mixes both endpoints, so `a_k⁰` depends on both blocks — but never on a third,
+so each edge couples exactly two adjacent vertex blocks.
+
+**Correction (Phase 2): that rescale is to `L_e`, not `C_e`, and so `M_e` is not constant.**
+An earlier draft of this section said `C_e` and inferred constancy from it. The coefficients
+have to describe the *canonical* profile `q(u) = L_e·κ(L_e·u)` — that is what
+`integrateProfile` integrates and what `KSCALE` then scales — and its endpoint Taylor data
+carries `L_eⁿ⁺¹`, so substituting any other constant `S_e` leaves the realized geometry
+carrying `(S_e/L_e)ⁿ⁺¹` times the intended derivative at each end. Continuity across a joint
+would then require `C₁/L₁ = C₂/L₂`. Measured in §14. Only `Rᵥ` and the §6 energy weights stay
+chord-derived, and for both the argument above is unaffected: `Rᵥ` fixes what the unknowns
+*mean*, which is exactly what must not drift, while `M_e` is a reconstruction map and its
+drifting is no worse than `KTH_e`'s.
 
 The orientation sign is `(−1)ⁿ⁺¹`, i.e. **even** orders flip. Under arclength reversal
 `s̃ = L − s` the tangent reverses and signed curvature flips with it, but its derivative
@@ -240,6 +250,11 @@ r_v = wrap( θ_e1(1) − θ_e2(0) )       θ_e(u) = L_e · ∫₀^u κ du + KTH_
 `∫κ` is a linear functional of the coefficients, and `spower.md` §6 gives it exactly in
 closed form on the pairs. `L_e` and `KTH_e` are not linear — see §5.
 
+*(Simplified in Phase 2.* With the coefficients carrying the canonical profile
+`q = L_e·κ(L_e·u)` — see §3's correction — this is just `θ_e(u) = ∫₀^u q + KTH_e`, since
+`∫₀^u q dv = ∫₀^{L_e·u} κ ds` is the turning outright. The `L_e` factor does not disappear,
+it moves into `M_e`, where it is `L_eⁿ⁺¹` rather than `L_e`.*)*
+
 Use the wrapped signed angle difference, not `acos(t1·t2)`. The current residual
 (`clothoid.ts:493`) has three distinct problems and only the third is about magnitude:
 
@@ -324,10 +339,16 @@ row per G1 pairing touching two adjacent blocks. What is constant and what is no
 
 | | Constant across the solve? | Why |
 |---|---|---|
-| `M_e`, `Rᵥ` | **yes** | built from chord lengths, which are solver input |
-| `H` | **yes** | §6's weights use `C_e`, not `L_e` — assemble and Gram-scale once |
+| `Rᵥ`, `E_e` | **yes** | built from chord lengths, which are solver input |
+| `M_e` | no | the rescale is to `L_e` — see §3's correction and §14 |
+| `H = Σ M_eᵀ E_e M_e` | no | `E_e` is constant, `M_e` is not, so the congruence is redone |
 | `J` | no | carries `∂KTH/∂x`, `∂L_e/∂x` — reassembled per Newton step |
 | the KKT factorization | no | refactored per Newton step, `O(V·(p+1)³)` each |
+
+The `H` row is the one that changed, and the cost model survives it: reassembly is a
+congruence per edge, `O(V·(p+1)³)`, which is the same order as the factorization that
+already runs every step. A worse constant, not a worse algorithm. The `E_e` row is what
+the chord-weight argument below actually buys, and that part stands.
 
 Using chord length rather than arclength in the energy weights is what buys the `H` row,
 and it is not a fudge: the energy is a regularizer, and any equivalent quadratic form will
@@ -452,7 +473,7 @@ wanted, it is a `κ = 0` boundary row, cheap to add, and then it is an authored 
 Both are constant `(2p+2)²` matrices per order, computable once in exact rational
 arithmetic — the entries are `∫₀¹ σ^{j+k}(1−u)^α u^β du`, i.e. Beta functions. For `p ≤ 3`
 these are at most 8×8. Compute them offline, check them in as literals, and record `κ(H)`
-for each order.
+for each order. *(Done, with one deviation — §14.)*
 
 s-power is not an orthogonal basis, so unlike shifted Legendre it does not diagonalize
 `∫κ²`. It buys structural endpoint continuity instead. The two bases are related by a
@@ -738,8 +759,26 @@ reach them through the structural interfaces in `curve/mesh_types.ts`. Options:
 - have `SPowerSolver` own a side table keyed by vertex;
 - keep blocks on edges and re-impose sharing as an explicit constraint (defeats the point).
 
-This needs deciding before the first solver phase, and it is the one place the design pushes
-back on the existing module boundaries.
+**Decided in Phase 2: the side table, owned by the solver instance.** Reasons, in order of
+weight:
+
+1. It needs no change to `mesh_types.ts`, no change to `mesh/`, and no serialization
+   question — an opaque slot on `SolvableVertex` would have to be either untyped (and so
+   unserializable through `nstructjs`, which wants a declared struct) or typed on the s-power
+   representation, which puts a `curve/` concept into the structural interface that three
+   other solvers also implement.
+2. The solver already has to build a vertex ordering for the banded system, so it already
+   holds a `Map<vertex, index>`. The blocks are one `Float64Array` indexed by that same
+   ordering; the side table costs nothing beyond what the ordering costs anyway.
+3. The blocks are *derived* state, not authored state. What a file needs to round-trip is
+   the solved geometry — which lives on the curve, as it already does — plus the input
+   polyline. Re-deriving blocks from a stored curve is one `pairsToTaylor` per edge.
+
+The cost is that blocks do not survive between `solve()` calls, so there is no warm start
+across edits. That is a real cost for the interactive case §6's locality argument is aimed
+at, and the fix — hoisting the table to something that outlives the solver instance — is
+additive, so it is deferred rather than designed around. Revisit in Phase 5, when the
+diagnostics channel gives a natural place to hang persistent solver state.
 
 Second: `SolvableVertex` needs pairing-and-level access, and the chain decomposition of §5
 has to be computable through the structural interface without reaching into `mesh/`. The
@@ -798,6 +837,12 @@ than a knob turned on the existing solver.
 Ordered so the cheapest experiment carrying the most information runs first. The first two
 phases are gates and neither of them involves the solver.
 
+**Status: 0a, 0b, 1, 2 and 3 are done; both gates passed.** See §14 for the measurements.
+Phase 2 landed with the frozen Jacobian solving single-joint chains only, which is what §5
+predicted; Phase 3's exact row solves every chain tried, in four to eight steps, independent
+of edge orientation. The frozen assembly is retained behind
+`SPowerSolverOptions.jacobian: "frozen"` so §5's claim stays re-measurable.
+
 **Phase 0a — the quadrature gate.** A standalone harness, no mesh, no solver, no
 `Clothoid`: fix a coefficient vector, integrate the Taylor scheme at `N` steps, compare
 against `N = 2000`, and read the observed order — for an s-power profile and for a
@@ -842,6 +887,17 @@ finite differences on a single edge before anything else. Line search, merit fun
 convergence. Compare iteration counts against Phase 2's frozen version — the prediction from
 §5 is roughly 17 frozen iterations against 3–4 Newton ones on an arc, and no convergence at
 all frozen on a front-loaded profile. *Medium.*
+
+That prediction turned out to understate it: §14 measures no convergence frozen on *any*
+chain with two interior joints, front-loaded or not. The finite-difference harness Phase 3
+opens with already exists in the form §14 used, so it is the first thing to land properly.
+
+Landed, with one correction to the recipe. Differentiating the *integral* and quadraturing
+the result is not good enough: the residual the solver drives to zero is the discrete Taylor
+sum, so its Jacobian is the derivative of that sum, term by term. The two differ by `3e-4`
+relative at nineteen steps — enough that a finite-difference tolerance loose enough to accept
+it would also have accepted a genuinely wrong row. Differentiating the discrete scheme costs
+nothing extra and agrees with central differences to roundoff at any step count.
 
 **Phase 4 — the control experiment.** Run the *existing* piecewise-linear profile through
 the Phase 2/3 solver, using §10's generic profile interface. This is what separates "the
@@ -921,10 +977,15 @@ is decomposition and elimination only, not a representation change. *Medium.*
   `curvatureConstraint` is the inverted one: when both edges have `v` as their `v1`, the
   through-path traverses `e1` backwards and `κ` must flip, which is what the tangent version
   does and the curvature version does not. The correct line is
-  `const flip = isV1e1 === isV1e2;`. This has been derived independently twice but not yet
-  confirmed at runtime, which is Phase 1's job. It is only reachable when `enableG2` is
-  `true` — off by default — which is why it has gone unnoticed, and fixing it inverts
-  behaviour for anyone who has turned G2 on.
+  `const flip = isV1e1 === isV1e2;`. It is only reachable when `enableG2` is `true` — off
+  by default — which is why it has gone unnoticed, and fixing it inverts behaviour for
+  anyone who has turned G2 on.
+
+  *Resolved in Phase 1.* Confirmed at runtime and fixed; `tests/joint.test.ts` solves the
+  same three-point chain in all four orientations and reads the joint curvature in world
+  space. The world-space G2 residual went from `−2.5e-2` to `−3.1e-4` and, more tellingly,
+  became uniform across the four configurations. Note the rule was inverted in *every*
+  configuration, not two of them, since the two tests are exact negations.
 - **`circleArc` is inconsistent and is being removed, so do not measure against it.**
   `curvature`/`dCurvature` use `ds = 1/klen` while `integral` uses `1/(klen−1)`, an 8.3%
   error in θ (`clothoids.md` §8). Since the profile is slated for deletion along with the
@@ -933,9 +994,242 @@ is decomposition and elimination only, not a representation change. *Medium.*
   integrable profile constructed in the harness instead.
 - **There are still no tests.** `clothoids.md` §8 lists this as a live gap and every
   convergence claim in this document is either measured ad hoc or inherited. Phase 1 is
-  where that changes.
+  where that changes. *(Resolved ahead of schedule: `node --test` via `tools/test.mjs`,
+  `pnpm test`, landed with Phase 0a. 29 tests at the 0a/0b boundary.)*
 
-## 14. References
+## 14. Measured results
+
+### Phase 0a — quadrature order (`tests/quadrature.test.ts`)
+
+One degree-7 `κ(u)` with an interior sign change, carried by both representations at
+matched total turning `Φ`: exactly in the s-power basis at `p = 3`, and sampled at
+`KORDER = 12` points for the piecewise-linear one. Error is the endpoint distance against a
+12-node composite Gauss-Legendre reference built on each profile's own closed-form `∫κ`
+(`tests/support/reference.ts`) — deliberately not a refinement of the scheme under test,
+since correlated errors would make the reported order partly self-reported.
+
+Observed order between successive step counts, `Φ = π/2`:
+
+| `N` | piecewise-linear | order | s-power | order | s-power + `ds³` | order |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 3.03e-2 | | 4.55e-2 | | 2.15e-2 | |
+| 3 | 8.60e-3 | 3.11 | 1.18e-2 | 3.32 | 4.33e-3 | 3.95 |
+| 4 | 3.89e-3 | 2.76 | 4.83e-3 | 3.11 | 1.41e-3 | 3.90 |
+| 6 | 1.30e-3 | 2.70 | 1.42e-3 | 3.03 | 2.86e-4 | 3.93 |
+| 8 | 4.62e-4 | 3.59 | 6.00e-4 | 2.99 | 9.16e-5 | 3.96 |
+| 11 | 8.98e-5 | 5.14 | 2.32e-4 | 2.98 | 2.59e-5 | 3.97 |
+| 16 | 5.46e-5 | 1.33 | 7.62e-5 | 2.98 | 5.82e-6 | 3.98 |
+| 19 | 3.58e-5 | 2.46 | 4.57e-5 | 2.98 | 2.93e-6 | 3.99 |
+| 32 | 8.66e-6 | 2.72 | 9.65e-6 | 2.98 | 3.67e-7 | 3.99 |
+| 64 | 1.07e-6 | 3.01 | 1.22e-6 | 2.99 | 2.30e-8 | 3.99 |
+| 128 | 1.13e-7 | 3.25 | 1.53e-7 | 2.99 | 1.44e-9 | 4.00 |
+
+**The order half of §7 holds exactly as predicted.** The piecewise-linear column reproduces
+`clothoids.md` §4 — order wandering over 1.33–5.14, and the swing is worse than that record
+suggests. The s-power column is 2.94–3.00 across the whole sweep at every `Φ` tested
+(π/4, π/2, π) and monotone from `N = 2` up. The `ds³` terms give 3.90–4.00.
+
+**The constant half needs a correction to §7's expectation.** The s-power third-order
+constant is *not* better than piecewise-linear; it is consistently 1.0–1.5× worse (worst
+case 1.46× over Φ ∈ {π/4, π/2, π} × N ∈ {3,4,6,8}). The reason is structural: a
+piecewise-linear `κ` has `κ″ = 0` inside every piece, so the scheme's `ds²` term is exact
+almost everywhere and it pays only the kink contribution — which is the same fact that
+destroys its observed order. §7's claim that `O(ds³)` "should hold from the first step" is
+right; any implied claim that it also lowers the constant is not.
+
+What actually pays for the representation is the fourth-order terms, which need `κ″` and so
+are *unavailable* to a piecewise-linear profile at any step count. With them, s-power beats
+piecewise-linear at matched `N` everywhere measured: 1.33× at the coarsest corner
+(`Φ = π`, `N = 3`) and 3.8–8.2× by `N = 8`. §7's "3–4 steps only with a turning bound"
+caveat stands and is if anything the operative constraint.
+
+Two knock-on decisions: the fourth-order terms should be **on by default**, not an option,
+and the equal-turning schedule matters more than the raw step count, as §7 argues.
+
+### Phase 0b — conditioning (`tests/spower.test.ts` plus offline measurement)
+
+`κ₂` of the Gram matrices per order, symmetric Jacobi eigenvalues, `κ(H)` at `α = 1`:
+
+| `p` | `κ(M)` | `κ(K)` over its non-null range | `κ(H)`, `α = 1` |
+| --- | --- | --- | --- |
+| 0 | 3.0 | 1 | 4.33 |
+| 1 | 7.27e2 | 20 | 21.2 |
+| 2 | 1.886e5 | 1.8e3 | 1.938e3 |
+| 3 | 5.097e7 | 2.435e5 | 2.631e5 |
+
+Mass eigenvalues decay roughly as `16^{-k}` in the pair index, which is what drives the
+growth. This **confirms §13's expectation that conditioning degrades with `p`**, and shows
+§6's "~462 at `p = 2`" was optimistic by two and a half orders of magnitude for `M`.
+
+But the number that governs the solve is `κ(H)`, not `κ(M)`, and the energy's stiffness
+part is far better conditioned than its mass part. At `κ(H) ≈ 2e3` for `p = 2`, a direct
+double-precision solve has ample margin, so §13's "at `p ≥ 2` assume preconditioning is
+necessary" is slightly pessimistic — `p = 2` is fine unpreconditioned, `p = 3` is where the
+shifted-Legendre map §6 holds in reserve becomes worth measuring.
+
+**Deviation from §6, deliberate:** the plan asks for the Gram matrices to be computed
+offline and checked in as literals. `src/curve/spower.ts` instead computes them at load
+time from exact `BigInt` rationals (Beta functions via factorials), memoized per order. It
+is the same numbers by a shorter path to being wrong, and it extends to any `p` without a
+second code-generation step.
+
+### Phase 2 — the transform rescale (`tests/blocks.test.ts`)
+
+§3 as drafted said `M_e` rescales `Rᵥ → C_e` and concluded that `M_e` and `H` are therefore
+constant across the solve. That is wrong, and the error is not small.
+
+The coefficients have to describe the canonical profile `q(u) = L_e·κ(L_e·u)`, because that
+is the object `integrateProfile` turns into a unit-arclength curve and `KSCALE` then scales
+onto the edge. Its endpoint Taylor data is
+
+```
+(1/n!)·dⁿq/duⁿ|₀ = (L_eⁿ⁺¹/n!)·dⁿκ/dsⁿ|₀ = L_e·(L_e/Rᵥ)ⁿ·block(v)_n
+```
+
+so `L_eⁿ⁺¹`, not `C_eⁿ⁺¹`. Substituting any other constant `S_e` makes the realized geometry
+carry `(S_e/L_e)ⁿ⁺¹` times the intended derivative at each end, and continuity across a
+joint then needs `C₁/L₁ = C₂/L₂`. For a circular arc, `L/C = (Φ/2)/sin(Φ/2)`, so the
+mismatch a chord rescale introduces is:
+
+| turning `Φ` | `L/C` | error in `κ′` | in `κ″` | in `κ‴` |
+| --- | --- | --- | --- | --- |
+| 0.25 | 1.0026 | 0.5% | 0.8% | 1.0% |
+| 0.50 | 1.0105 | 2.1% | 3.1% | 4.1% |
+| 1.00 | 1.0429 | 8.1% | 11.8% | 15.5% |
+| π/2 | 1.1107 | 18.9% | 27.0% | 34.3% |
+| π | 1.5708 | 59.5% | 74.2% | 83.6% |
+
+Not a rounding effect at any turning a brush stroker produces, and it is the whole
+structural-continuity claim, so the rescale uses `L_e`. Two edges laid along one degree-`2p+1`
+polynomial with `L/C` of 1.46 and 1.09 meet to `0.0`–`7.1e-15` through `p = 3`; the same
+setup with the chord rescale leaves a **25.4%** curvature jump, which is exactly
+`(C₁/L₁)/(C₂/L₂) = 0.746`. `tests/blocks.test.ts` carries both directions, the second as a
+guard so restoring §3's letter fails loudly.
+
+One trap this took a wrong turn on first: substituting a constant and then *reading the
+derivatives back with the same constant* cancels exactly, so a test written entirely in
+coefficient space reports a gap of zero and the bug looks like a non-issue. The measurement
+has to go through the realized arclength.
+
+Three consequences, all recorded above: §3's rescale is corrected, §5's constancy table
+loses its `M_e` and `H` rows (assembly is `O(V·(p+1)³)` per step, the same order as the
+factorization already there, so a worse constant and not a worse algorithm), and §4's
+residual *simplifies* — with `q` canonical, `θ_e(u) = ∫₀^u q + KTH_e` with no `L_e` factor
+out front, since `∫₀¹ q du` is the total turning outright. The unknown arclength has not
+gone away; it has moved from the residual into `M_e`.
+
+`Rᵥ` and the §6 energy weights stay chord-derived. Those arguments are untouched: `Rᵥ` fixes
+what the unknowns mean and so must not drift, and a chord-weighted regularizer strengthens
+on an edge turning toward closure where an arclength-weighted one would switch itself off.
+Reading §6's `κ` as `q` rather than as world curvature makes the energy differ from the
+physical bending energy by `(C_e/L_e)²`, which is within a regularizer's licence and is what
+keeps `E_e` constant.
+
+### Phase 2 — how far a frozen Jacobian actually gets (`tests/spower_solver.test.ts`)
+
+§5 called freezing `KTH_e` and `L_e` "the wrong sparsity pattern, not a small lag." Measured
+on the four-edge zigzag `(0,0) (1,.35) (2,.2) (3,.9) (4,.7)` at `p = 1`, `α = 0.1`, that is
+an understatement. Central differences of the true residual against the assembled row at the
+first interior joint, one column per DOF:
+
+| DOF | `e⁻` near | `e⁻` far | `e⁺` near | `e⁺` far |
+| --- | --- | --- | --- | --- |
+| frozen | −0.530, −0.088 | −0.530, 0.090 | 0.000, 0.000 | — |
+| true | −0.159, −0.035 | −0.725, 0.005 | −0.152, 0.031 | — |
+
+Wrong by a factor of 3.3 on the entry it leans on hardest, and identically zero on the
+leaving edge's block, where the truth is −0.152. The consequence splits cleanly by joint
+count:
+
+| chain | orientations | result |
+| --- | --- | --- |
+| one interior joint | FF, RR, FR | superlinear, `5.9e-10` / `3.2e-11` / `6.6e-11` |
+| two or more | FFFF, RRRR | no convergence at any step length |
+
+One badly scaled row is still a descent direction, so a single joint converges regardless of
+orientation. Two joints need the coupling the frozen row does not have, and no damping
+recovers it: undamped it limit-cycles at `8.1e-1`, and a fixed relaxation only chooses which
+value it stalls at (`0.15 → 9.7e-11` on FFFF but `NaN` on RRRR — the appearance of
+convergence there is the geometry of one test, not a property of the scheme).
+
+Two things had to change as a result, both of them safety rather than convergence, and both
+kept in Phase 3 where they earn their place for an ordinary reason instead of a pathological
+one — a Gauss-Newton step is exact only to first order:
+
+- **A line search on §5's `ℓ1` merit `½zᵀHz + μΣ|c_i|`.** Undamped, the frozen coefficients
+  ratchet — `2.4e0`, `1.1e1`, `3.0e1`, then `4.4e70` by the sixty-fourth pass — because the
+  step keeps demanding a correction the linearization cannot deliver while `L_e` feedback
+  erodes the energy term's relative weight. The factorization then returns `NaN` and the mesh
+  is left holding it. Halving the step until the merit improves turns divergence into a stall
+  with finite geometry. `μ` is set to twice the largest predicted `|λ|`, which is the standard
+  exact-penalty threshold; below it the Newton direction need not be a descent direction.
+- **`H` and `L_e` are held fixed across a search.** Only `c` is remeasured, on the real
+  curves. An early version reassembled and re-estimated arclength inside the search and then
+  rolled back on failure, which does not actually roll back: `L_e` lives on the frames rather
+  than in `z`, so the same `z` re-written against advanced arclengths measured `6.0e-9` where
+  the snapshot had been `5.9e-10`. Holding the model fixed for the duration of one search
+  means there is nothing to roll back, and it is also the only way the two merits being
+  compared are merits of the same function.
+
+The frozen fixed point is also orientation-dependent, and legitimately so: reversing a
+chain's edges swaps which edge the row can see, so the two runs stop at different solutions
+of `Hz + Jᵀλ = 0` with the same `c = 0`. Tangent continuity is exactly orientation-invariant;
+the shape agrees only to `4.8e-4`. That number is a direct read on how far the frozen
+stationarity condition sits from the real one, and Phase 3 takes it to `8e-7`.
+
+The assembly itself is verified independently and passes: `z·Kz` against the element
+matrices summed directly, and each `G1` row against `SPowerClothoid.turning`, which computes
+the same integral in closed form from the coefficients without going through
+`edgeTurningRow`. So the failure above is the Jacobian and nothing upstream of it.
+
+### Phase 3 — the exact Jacobian (`tests/spower_jacobian.test.ts`)
+
+`∂C(1)/∂a_j` is accumulated in the same loop as the endpoint, by differentiating the discrete
+Taylor sum term by term rather than requadraturing `∫₀¹ iφ_j e^{iθ}`. `κ` is linear in the
+coefficients for every profile here, so `∂κ/∂a_j` is the profile evaluated on the `j`-th unit
+vector and the whole thing is the product rule with `∂cos θ = −sin θ · φ_j`. `L_e` and `KTH_e`
+follow by §5's two lines of complex arithmetic.
+
+Differencing that against the quantities it claims to differentiate, at `h = 1e-6`:
+
+| differenced | against | worst gap |
+| --- | --- | --- |
+| `integrateProfile` endpoint | `∂C(1)/∂a_j` | `< 1e-8` |
+| `SPowerClothoid.length` | `∂L/∂a_j` | `< 1e-8` |
+| `SPowerClothoid.th` | `∂KTH/∂a_j` | `< 1e-8` |
+| `ChainSystem.residuals[i]` | the assembled row | `< 1e-8` |
+
+The last line is the one worth having. It differences the residual of the real chain system
+against the entry actually scattered into the band, over every DOF, at all four edge
+orientations — so the pullback through `M_e`, the sign convention against `measure`, and the
+scatter are checked together, which is exactly the combination that fails silently. `1e-8` is
+the central-difference floor, not a fitted tolerance: differentiating the continuous integral
+instead lands at `3e-4` relative and passes nothing tighter than `1e-5`.
+
+Convergence, at `p = 1`, `α = 0.1`, tolerance `1e-10`, on three chains — the two-edge elbow,
+the four-edge zigzag, and a nine-point spiral — in three orientations each:
+
+| chain | exact | frozen |
+| --- | --- | --- |
+| elbow, FF / RR / mixed | 4 / 4 / 4 | 6 / 7 / 32 |
+| zigzag, FFFF / RRRR / mixed | 8 / 8 / 8 | stall at `1.4e-1` / stall at `2.6e-1` / 26 |
+| spiral, F×8 / R×8 / mixed | 6 / 6 / 6 | 55 / stall at `2.3e-2` / 31 |
+
+Three things in that table beyond the counts. The exact step count is *identical* across
+orientations of the same chain, and so is the final residual to the last digit — the row is
+built per edge from that edge's own frame, so nothing about it can depend on how the edge was
+constructed. The two frozen columns that converge on `mixed` do so because a joint was
+*dropped*: `unenforced` is 1 on the zigzag and 3 on the spiral, and the remaining problem is
+easier than the one asked for. And the frozen counts are not a monotone penalty — 6 to 32 on
+the same two-edge chain — which is what an inconsistent Jacobian looks like from outside.
+
+Orientation agreement of the converged shape, forward against fully reversed, sampled at nine
+points per edge: `7.8e-10` elbow, `8.0e-7` zigzag, `9.1e-9` spiral, against the frozen
+version's `4.8e-4`. The residue is the solve tolerance, not an asymmetry. Zoom invariance is
+now exact to roundoff — `3.8e-16` on arclength ratio and `1.3e-15` on coefficients across a
+37× zoom — where §3's dimensionless-profile argument said it should be.
+
+## 15. References
 
 - `docs/research/spower.md` — the basis, arithmetic, and the coefficient-extraction map.
 - `docs/research/clothoids.md` — the current formulation, the solver, and the measured

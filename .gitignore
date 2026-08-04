@@ -2,5 +2,6 @@ node_modules/
 dist/
 build/
 site/
+.test-build/
 *.tsbuildinfo
 .DS_Store

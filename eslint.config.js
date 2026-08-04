@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config([
   {
-    ignores: ["dist/**", "node_modules/**"],
+    ignores: ["dist/**", "node_modules/**", ".test-build/**"],
   },
 
   js.configs.recommended,
@@ -11,7 +11,7 @@ export default tseslint.config([
   tseslint.configs.stylistic,
 
   {
-    files: ["src/**/*.ts"],
+    files: ["src/**/*.ts", "tests/**/*.ts"],
     languageOptions: {
       parserOptions: {
         projectService: true,
