@@ -74,6 +74,14 @@ const TAU = Math.PI * 2.0;
 const SHRINK = 0.5;
 const MIN_RELAXATION = 1e-4;
 
+/**
+ * Consecutive stalled steps before a run is abandoned rather than iterated to its cap.
+ *
+ * Three and not one because a starved search is not by itself a dead run: `L_e` refreshes
+ * between passes, and that alone can carry a step the line search could not.
+ */
+const STALL_LIMIT = 3;
+
 /** Signed angle in `(−π, π]`. §4: the residual has to carry a sign and stay differentiable. */
 function wrapAngle(a: number) {
   return a - TAU * Math.round(a / TAU);
@@ -367,6 +375,15 @@ export interface ComponentRun {
 
   /** True if a line search ran out of room without improving the merit. */
   starved: boolean;
+
+  /**
+   * True if the run gave up short of {@link SPowerSolverOptions.tolerance}.
+   *
+   * Two ways to give up and they mean the same thing to §8: spend every iteration on the
+   * clock, or stop early because the residual stopped moving and the budget could not have
+   * changed that. Recorded rather than inferred from {@link steps}, which only sees the first.
+   */
+  stalled: boolean;
 
   /** Worst `‖Ax − b‖∞` after refinement, over the steps taken. `Infinity` if one failed. */
   refinement: number;
@@ -1080,7 +1097,6 @@ export class ChainSystem {
     const healing = (v: SolvableVertex) => broken?.has(v) ?? false;
 
     const rate = geometricRate(run.history);
-    const stalled = run.steps >= this.options.iterations && !(run.residual < this.options.tolerance);
 
     for (let i = 1; i < this.frames.length; i++) {
       if (this.lambdaAt[i] < 0) {
@@ -1140,7 +1156,7 @@ export class ChainSystem {
       // All three of §8's signals, and the fit is required rather than assumed: a run too
       // short to fit a rate over three iterations is a budget, not a divergence, and a
       // solve cut off at two steps must not cost anyone a continuity level.
-      const diverging = Number.isFinite(rate) && rate >= threshold && (stalled || run.starved);
+      const diverging = Number.isFinite(rate) && rate >= threshold && (run.stalled || run.starved);
 
       if (!run.ok || diverging) {
         const measured = Number.isFinite(rate) ? rate : Infinity;
@@ -1244,13 +1260,10 @@ export class ChainSystem {
 
     const rate = geometricRate(run.history);
 
-    // Negated rather than `>=`, so a residual that went non-finite counts as not converged.
-    const stalled = run.steps >= opts.iterations && !(run.residual < opts.tolerance);
-
-    if (stalled || rate >= limits.newtonRate) {
+    if (run.stalled || rate >= limits.newtonRate) {
       into.push({
         condition: "newton-not-converging",
-        severity : stalled ? "error" : "warning",
+        severity : run.stalled ? "error" : "warning",
         action   : "none",
         chain,
         at       : -1,
@@ -2210,6 +2223,7 @@ export class ComponentSystem {
 
     let backtracks = 0;
     let starved = false;
+    let stalls = 0;
     let refinement = 0.0;
     let multiplier = 0.0;
     let branchCuts = 0;
@@ -2253,6 +2267,7 @@ export class ComponentSystem {
       const start = this.merit(mu);
       let t = opts.relaxation;
       let cuts = 0;
+      let starving = false;
 
       for (;;) {
         for (let i = 0; i < this.n; i++) {
@@ -2275,6 +2290,7 @@ export class ComponentSystem {
         // Out of room rather than out of patience: the direction was not a descent one.
         if (t < MIN_RELAXATION) {
           starved = true;
+          starving = true;
 
           // Put the last *rejected* trial back. Leaving it applied is how a bound the line
           // search is enforcing gets defeated by the very step it refused.
@@ -2328,6 +2344,21 @@ export class ComponentSystem {
         relaxation   : t,
         refinement   : solved.residual,
       });
+
+      // A starved search restores `z` and changes nothing, so what still moves the residual
+      // is the `L_e` refresh alone. Stop once §8's own break threshold says that trend is
+      // not converging either, rather than iterating to the cap to prove it.
+      if (starving && history.length >= RATE_WINDOW) {
+        const rate = geometricRate(history);
+
+        stalls = rate < stabilityThresholds.rateBreak ? 0 : stalls + 1;
+      } else {
+        stalls = 0;
+      }
+
+      if (stalls >= STALL_LIMIT) {
+        break;
+      }
     }
 
     return {
@@ -2339,6 +2370,7 @@ export class ComponentSystem {
       backtracks,
       branchCuts,
       starved,
+      stalled: !(residual < opts.tolerance) && (steps >= opts.iterations || stalls >= STALL_LIMIT),
       refinement,
       multiplier,
       trace,

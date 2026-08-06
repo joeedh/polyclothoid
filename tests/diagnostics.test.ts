@@ -48,11 +48,15 @@ const ZIGZAG = [
 ];
 
 /**
- * A near-doubling-back chain, which the solver drives to coefficients around `1e+80`.
+ * A near-doubling-back chain, which the solver drives towards a segment longer than its own
+ * chord — a canonical reading above `1`, which is why the chord is checked against `1` as
+ * well as against zero.
  *
- * It then reports a zero angle gap, because every segment has collapsed to a point and two
- * points agree tangentially for free. This is the "looks right and is not" case §8 exists
- * for, and it is why the canonical chord is checked against `1` as well as against zero.
+ * It used to run all the way to coefficients around `1e+80` and every segment collapsed,
+ * which is the shape §8's "looks right and is not" case was written against: collapsed
+ * points meet tangentially for free, so the angle gap read zero. §14's stall cutoff now
+ * stops the run long before that, and the fully collapsed variant lives in
+ * `winding.test.ts` instead, on a chain the cutoff cannot rescue.
  */
 const HAIRPIN = [
   [0, 0],
@@ -253,23 +257,15 @@ describe("Phase 5: what gets recorded", () => {
   });
 
   /*
-    The reason the canonical chord is checked from both ends. Here the coefficients run away
-    and every segment collapses, with the ladder switched off so the collapse is not repaired
-    before it can be measured.
+    The reason the canonical chord is checked from both ends, with the ladder switched off so
+    the runaway is not repaired before it can be measured.
   */
-  it("catches a runaway from the other side, where the residual cannot", () => {
-    const { mesh, edges } = polyline(HAIRPIN);
-
-    const report = new SPowerSolver(mesh, { breaks: 0 }).solve();
-
-    // The residual is no help in either direction. Two collapsed points meet tangentially for
-    // free, so this fixture used to report a gap of exactly zero and `ok: true`; now that the
-    // geometry is checked it reports `NaN`. Neither number says "degenerate" on its own.
-    assert.equal(report.ok, false, "a solve that produced no geometry must not report success");
+  it("catches a runaway from the other side", () => {
+    const report = new SPowerSolver(polyline(HAIRPIN).mesh, { breaks: 0 }).solve();
 
     const chord = report.diagnostics.filter((d) => d.condition === "chord-degeneracy");
 
-    assert.equal(chord.length, edges.length);
+    assert.ok(chord.length > 0, "a segment longer than its chord must be recorded");
 
     for (const d of chord) {
       assert.equal(d.severity, "error");
@@ -278,6 +274,11 @@ describe("Phase 5: what gets recorded", () => {
       // the reading overshot or stopped being a number at all.
       assert.ok(!(d.measured <= 1.0), `canonical chord ${d.measured} is not out of range`);
     }
+
+    // The run is abandoned rather than converged, and says so. Without this the assertions
+    // above would also pass on a clean solve that happened to record nothing.
+    assert.ok(report.maxResidual > 1e-10, `residual ${report.maxResidual}`);
+    assert.equal(only(report.diagnostics, "newton-not-converging").severity, "error");
   });
 
   it("reports a failed factorization once, and not as a refinement fault", () => {
@@ -296,6 +297,7 @@ describe("Phase 5: what gets recorded", () => {
       backtracks: 0,
       branchCuts: 0,
       starved   : false,
+      stalled   : false,
       refinement: Infinity,
       multiplier: 0.0,
     };
