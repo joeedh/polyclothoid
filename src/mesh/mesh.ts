@@ -6,6 +6,7 @@ import {
   type CurveSolver,
   type PairingChannel,
   type SolvableMesh,
+  type SolverTuning,
   emptySolveReport,
 } from "../curve/index.js";
 import * as nstructjs from "nstructjs";
@@ -30,7 +31,7 @@ export const RecalcFlags = {
 
 /** Curve types are pluggable; see {@link Mesh.switchSplineType}. */
 export type CurveConstructor = new (v1?: Vertex, v2?: Vertex) => Curve;
-export type CurveSolverConstructor = new (mesh: SolvableMesh) => CurveSolver;
+export type CurveSolverConstructor = new (mesh: SolvableMesh, tuning?: SolverTuning) => CurveSolver;
 
 export class Element {
   static STRUCT = nstructjs.inlineRegister(
@@ -638,6 +639,13 @@ mesh.Mesh {
   /** The live {@link SolverCls} instance, kept for its cross-solve state — see {@link solve}. */
   solver?: CurveSolver;
 
+  /**
+   * Handed to {@link SolverCls} when it is built. Change it through {@link setSolverTuning}.
+   *
+   * Not serialized: it describes how this session wants curves fitted, not the document.
+   */
+  solverTuning: SolverTuning = {};
+
   elists = new Map<number, ElementArray>();
 
   verts!: ElementArray<Vertex>;
@@ -716,12 +724,35 @@ mesh.Mesh {
     this.recalc &= ~RecalcFlags.SOLVE;
 
     if (!this.solver || !(this.solver instanceof this.SolverCls)) {
-      this.solver = new this.SolverCls(this);
+      this.solver = new this.SolverCls(this, this.solverTuning);
     }
 
     this.report = this.solver.solve();
 
     return this.report;
+  }
+
+  /**
+   * Reconfigure {@link SolverCls}, and re-solve if that actually changed anything.
+   *
+   * A solver reads its options once, when it is constructed, so a change means a new instance
+   * and the loss of §8's hysteresis along with it. That is the right trade when the bound
+   * really moved and the wrong one on every unrelated UI event, which is what the comparison
+   * is for — a control panel can call this on every change without paying for it.
+   */
+  setSolverTuning(tuning: SolverTuning) {
+    const before = this.solverTuning as Record<string, unknown>;
+    const after = tuning as Record<string, unknown>;
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+
+    if ([...keys].every((k) => before[k] === after[k])) {
+      return this;
+    }
+
+    this.solverTuning = { ...tuning };
+    this.solver = undefined;
+
+    return this.regenSolve();
   }
 
   /** Replace every edge's curve with a fresh instance of `CurveCls` and re-solve. */

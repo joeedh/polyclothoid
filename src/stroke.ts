@@ -39,6 +39,20 @@ export interface StrokerOptions {
    * straight through. Set it to `0` to author no corners at all.
    */
   cornerThreshold?: number;
+
+  /**
+   * How far an edge may turn away from where it started during one fit — see
+   * `SPowerSolverOptions.branchLimit`, which this is passed straight through to.
+   *
+   * It is here because it is not only a guard. Above about `5.7` radians it separates a real
+   * fit from a spiral that wound onto the wrong branch and is doing nothing else; at or below
+   * `π` it starts acting as a shape preference, holding strokes tighter at the price of
+   * breaking G1 at more joints. Which of those a brush wants is the caller's judgement, and
+   * the default — a full circle — makes it purely the guard.
+   *
+   * Ignored by solvers that cannot wind. `Infinity` disables it.
+   */
+  branchLimit?: number;
 }
 
 /** ~72°, the value `ClothoidSolver` used before the test moved out here. */
@@ -124,10 +138,14 @@ export class Stroker {
     const history = this.history;
     const mesh = new Mesh();
 
-    const { CurveCls, SolverCls } = this.options;
+    const { CurveCls, SolverCls, branchLimit } = this.options;
     if (CurveCls && SolverCls) {
       mesh.CurveCls = CurveCls;
       mesh.SolverCls = SolverCls;
+    }
+
+    if (branchLimit !== undefined) {
+      mesh.solverTuning = { branchLimit };
     }
 
     let e;

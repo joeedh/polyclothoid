@@ -1887,18 +1887,127 @@ there is nothing to answer — and the sweep is unchanged at `0.89t`. The ladder
 the guard is insufficient and stays out of the way where it is not.
 
 **What it costs.** `fold4` runs 1033 ms/frame guarded against 438 unguarded, `spike` 907 against
-366, and `fold5` 2110 against 964; each ladder attempt rebuilds the continuation rungs from
-`p = 0`, and these frames reach seven. The unguarded column is not an option — it winds five
-frames out of 251 on `spike` and four on `fold5` — but a consistent 2.2–2.4× on pathological
-frames is worth revisiting, as is the second-a-frame absolute number on a five-vertex chain.
-Benign geometry is untouched: the guard costs nothing measurable on a chain that never
-approaches a branch.
+366, and `fold5` 2110 against 964; the ladder reaches seven attempts on these frames. The
+unguarded column is not an option — it winds five frames out of 251 on `spike` and four on
+`fold5` — but a consistent 2.2–2.4× on pathological frames is worth revisiting, as is the
+second-a-frame absolute number on a five-vertex chain. Benign geometry is untouched: the guard
+costs nothing measurable on a chain that never approaches a branch. The subsection below is that
+revisit; the attribution originally written here, that each attempt rebuilds the continuation
+rungs from `p = 0`, was wrong on its face — `continuation` defaults to `false`, so `ladder()`
+runs one rung.
 
 **Coverage is split deliberately.** The suite pins the mechanism on a static six-vertex zigzag,
-where the fault is raised, localized to joint 2, and answered with a break, and where `breaks: 0`
-returns `ok: false` and non-finite geometry instead. The 251-frame drags above are offline
-measurement: at roughly a second a frame they would quadruple the suite to pin what the static
+where the fault is raised, localized to one interior joint, and answered with a break, and where
+`breaks: 0` returns `ok: false` and non-finite geometry instead. *Which* joint is not pinned, and
+should not be: the ladder retries, and the rung that gives up first moved when the cutoff below
+landed without changing the answer it converges to. The 251-frame drags above are offline
+measurement: they would multiply the suite's runtime several times over to pin what the static
 fixture already pins.
+
+### Post-Phase 9 — where the guarded time went (`tests/diagnostics.test.ts`)
+
+**Reported from the demo: unstable vertex configurations are slow.** The subsection above ends
+by calling a second a frame worth revisiting. This is that, and the answer was not where the
+paragraph guessed.
+
+**Almost all of the work went into runs that were thrown away.** Counting line-search
+write-backs per `ComponentSystem.run` and splitting them by outcome, the failing attempts of the
+§8 ladder dominate: on `fold4` they take 96.2% of the work, average 336 Newton steps against 23
+for the runs that land, and 457 of 556 of them iterate to the 400-step cap. What they have in
+common is not the cap, though — 549 of those 556 had a starving line search.
+
+**A starved line search does nothing, and then does it 400 times.** When `t` falls below
+`MIN_RELAXATION` the loop restores `this.z` from `base`: the direction was not a descent one, so
+the rejected trial is rolled off and the iteration changes *nothing*. It then keeps iterating to
+`opts.iterations`, because nothing was watching for that. `SHRINK = 0.5` from `relaxation = 1.0`
+is about fourteen halvings to reach the floor, which is exactly the trial-write-backs-per-step
+ratio the failing runs show and the landing ones do not.
+
+**The cutoff reuses §8's own break threshold rather than inventing one.** Once a step has
+starved, the only thing still moving the residual is the `L_e` refresh between passes — so the
+run is abandoned when `geometricRate(history)` says that trend is not converging either, for
+`STALL_LIMIT = 3` consecutive starved steps, and only once `history` is long enough to fit a rate
+at all. Three and not one because a starved search is not by itself a dead run: the refresh alone
+can carry a step the line search could not. The first version projected the residual against the
+iterations left on the clock instead, and broke continuity that did not need breaking; aligning
+with `stabilityThresholds.rateBreak` is both simpler and correct.
+
+**`ComponentRun.stalled` is now recorded rather than inferred.** Both `diagnose()` and `faults()`
+derived "the run gave up" from `run.steps >= opts.iterations`, which sees one of the two ways to
+stop and now misses the common one. The run reports it directly.
+
+**What it buys**, measured as one isolated 251-frame drag per case, guarded both sides:
+
+| | before, ms/frame | after | wound | non-finite | `ok: false` | degraded joints |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fold3` | 42.3 | **7.0** | 0 → 0 | 0 → 0 | 0 → 0 | 85 → 85 |
+| `fold4` | 448.5 | **24.2** | 0 → 0 | 0 → 0 | 0 → 0 | 295 → 294 |
+| `spike` | 477.1 | **25.4** | 0 → 0 | 0 → 0 | 0 → 0 | 312 → 316 |
+| `fold5` | 1306.3 | **52.9** | 0 → 0 | 0 → 0 | 0 → 0 | 502 → 488 |
+
+**Total curve length moves 3–5% on the three larger cases, and that is not a quality loss.**
+The obvious worry is that the cutoff retains unconverged answers. It does not: with it in place
+every frame of all four drags reports `maxResidual` below `tolerance`, worst about `1e-10`, so
+the different shapes are different *converged* solutions reached by a ladder that gives up on a
+dead rung sooner. Continuity actually given up is flat or slightly lower.
+
+**Two fixtures changed behaviour, both for the better, and the tests were rewritten to match.**
+The hairpin in `tests/diagnostics.test.ts` no longer runs to coefficients around `1e+80` with
+every segment collapsed — it is cut at 18 steps with finite geometry and a canonical chord of
+1.58, which is still out of range from above and still recorded as an error, which is what that
+test is for. The fully collapsed case it used to demonstrate is pinned in `tests/winding.test.ts`
+instead, on a chain the cutoff cannot rescue. And `branch-obstruction` on the tight zigzag now
+names a different joint and is recorded once per ladder attempt rather than once, so that
+assertion counts joints instead of records. The converged answer, the attempt count and the final
+residual are unchanged to the last digit.
+
+**Still on the table and not taken.** `integrateProfileJacobian` re-evaluates the profile basis
+on each unit vector at every quadrature node, per iterate, when those samples are
+iterate-independent and cacheable exactly as `unitCache` already caches the unit vectors. That is
+a constant-factor win on top of this one rather than an alternative to it.
+
+### Post-Phase 9 — what `branchLimit` is worth setting to, and who sets it
+
+Reported from the demo: *the winding limit "needs to be a bit more than 180 degrees."* Measured
+by sweeping the bound over the four pathological drags of the section above — 1004 warm frames
+pooled, quality columns as before, plus the largest turning any edge reached (`maxTurn`, radians)
+and the pooled total curve length:
+
+| `branchLimit` | ms/frame | wound | non-finite | `ok: false` | frames w/ a cut | `maxTurn` | total length |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `1.00π` | 35.1 | 0 | 0 | 0 | 681/1004 | 3.14 | 308 263 |
+| `1.05π` | 31.4 | 0 | 0 | 0 | 674/1004 | 3.29 | 310 210 |
+| `1.25π` | 31.6 | 0 | 0 | 0 | 643/1004 | 3.92 | 314 488 |
+| `1.50π` | 31.1 | 0 | 0 | 0 | 615/1004 | 4.70 | 318 090 |
+| `2.00π` | 30.8 | 0 | 0 | 0 | 572/1004 | 5.67 | 346 374 |
+| `3.00π` | 27.0 | 0 | 0 | 0 | 571/1004 | 5.67 | 352 851 |
+| `Infinity` | 15.0 | **11** | 0 | 0 | 570/1004 | 58.82 | 393 370 |
+
+**Every finite bound from `π` to `3π` eliminates winding**, so the question is not which one
+works but what each costs. Two readings settle it:
+
+- `2π` and `3π` agree on `maxTurn` to the digit. Given room the solver never asks for more than
+  about `5.7` rad, and `fold4` unguarded reaches exactly that without ever winding — so `5.7` is
+  a legitimate demand, not a runaway caught early. Anything above `2π` is inert.
+- At `π` the bound *binds*, on every case, at exactly its own value. It is below what legitimate
+  fits ask for. That is not a malfunction — it costs 19% more frames giving up a joint, about 11%
+  shorter curves and 14% more time — but it is a **shape preference**, holding strokes tighter at
+  the price of breaking G1 more often, and not the same instrument as the guard.
+
+So the two intents are separate: `2π` is the pathology guard and stays the default, and a bound
+near `π` is a style clamp a brush may want. That is the argument for making it settable rather
+than picking a compromise — and for putting it where an application can reach it without knowing
+which solver it has:
+
+- `SolverTuning` in `curve/mesh_types.ts` — the subset of solver options that describes the
+  drawing rather than the method. Every member optional, because a solver with no notion of a
+  field ignores it; `ClothoidSolverOptions` extends it and does exactly that.
+- `Mesh.solverTuning`, handed to `SolverCls` at construction, with `Mesh.setSolverTuning()` for
+  changes. Not serialized. It rebuilds the solver, and so drops §8's hysteresis, which is why it
+  compares first and no-ops on an unchanged value — a control panel can call it on every event.
+- `StrokerOptions.branchLimit`, passed straight through to the throwaway mesh of each fit.
+- The demo panel carries it in degrees, with a checkbox that sends `Infinity`, so the unguarded
+  behaviour is one click away rather than a rebuild.
 
 ## 15. References
 

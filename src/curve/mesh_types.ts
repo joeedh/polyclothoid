@@ -67,6 +67,19 @@ export interface SolvableMesh<C extends Curve = Curve> {
   edges: Iterable<SolvableEdge<C>>;
 }
 
+/**
+ * The slice of solver configuration a host may set without knowing which solver it has.
+ *
+ * Each solver owns its own options interface, and most of what is in them is specific to how
+ * that solver works. This is the subset that is a property of the *drawing* rather than of the
+ * method, so an application can offer it as a control. A solver that has no notion of a field
+ * ignores it, which is why every member is optional.
+ */
+export interface SolverTuning {
+  /** See `SPowerSolverOptions.branchLimit`. Ignored by solvers that do not wind. */
+  branchLimit?: number;
+}
+
 /** Fits every curve in a mesh so they agree at shared vertices. */
 export interface CurveSolver {
   /**

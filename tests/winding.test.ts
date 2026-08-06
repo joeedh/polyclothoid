@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { Mesh, SPowerClothoid, SPowerSolver, type Vertex } from "../src/index.js";
+import { Clothoid, ClothoidSolver, Mesh, SPowerClothoid, SPowerSolver, Stroker, type Vertex } from "../src/index.js";
 import { defaultSPowerSolverOptions } from "../src/curve/spower_solver.js";
 
 /**
@@ -188,12 +188,19 @@ describe("branch obstruction", () => {
   test("is raised against a joint, and the joint is lowered for it", () => {
     const found = repaired.report.diagnostics.filter((d) => d.condition === "branch-obstruction");
 
-    assert.equal(found.length, 1);
-    assert.equal(found[0].action, "degraded");
+    // Counted by joint, not by record: a rung records the joint that blocked it, so a joint
+    // the ladder retries through is named once per attempt.
+    const joints = new Set(found.map((d) => d.at));
 
-    // The whole reason the guard's bookkeeping is per chain rather than per component: a
-    // record that named the chain would have nothing for §8's ladder to act on.
-    assert.ok(found[0].at > 0, `an obstruction must name an interior joint, got ${found[0].at}`);
+    assert.equal(joints.size, 1);
+
+    for (const d of found) {
+      assert.equal(d.action, "degraded");
+
+      // The whole reason the guard's bookkeeping is per chain rather than per component: a
+      // record that named the chain would have nothing for §8's ladder to act on.
+      assert.ok(d.at > 0, `an obstruction must name an interior joint, got ${d.at}`);
+    }
   });
 
   test("and what comes back is a curve, which without the ladder it is not", () => {
@@ -216,6 +223,87 @@ describe("branch obstruction", () => {
       repaired.report.attempts > defaultSPowerSolverOptions.breaks,
       `${repaired.report.attempts} attempts against a per-chain budget of ${defaultSPowerSolverOptions.breaks}`
     );
+  });
+});
+
+/**
+ * `branchLimit` is the one solver option an application is expected to put in front of a
+ * person, so it has a route that does not go through a solver subclass: `Mesh.solverTuning`,
+ * `Mesh.setSolverTuning`, and `StrokerOptions.branchLimit`.
+ *
+ * What these check is that route. The bound's own behaviour is the drag above.
+ */
+describe("the tuning a host can set", () => {
+  const bound = (m: Mesh) => (m.solver as SPowerSolver).options.branchLimit;
+
+  function chain() {
+    const mesh = new Mesh();
+
+    mesh.switchSplineType(SPowerClothoid, SPowerSolver);
+
+    const verts = [
+      [0, 0],
+      [100, 0],
+      [200, 10],
+    ].map((p) => mesh.makeVertex([p[0], p[1], 0]));
+
+    mesh.makeEdge(verts[0], verts[1]);
+    mesh.makeEdge(verts[1], verts[2]);
+    mesh.solve();
+
+    return mesh;
+  }
+
+  test("reaches the solver, and left alone is the solver's own default", () => {
+    assert.equal(bound(chain()), defaultSPowerSolverOptions.branchLimit);
+  });
+
+  test("a change rebuilds the solver and an unchanged one does not", () => {
+    const mesh = chain();
+    const first = mesh.solver;
+
+    mesh.setSolverTuning({ branchLimit: Math.PI }).ensureSolve();
+
+    assert.equal(bound(mesh), Math.PI);
+    assert.notEqual(mesh.solver, first);
+
+    const second = mesh.solver;
+
+    mesh.setSolverTuning({ branchLimit: Math.PI }).ensureSolve();
+
+    // §8's hysteresis is per instance, so a panel echoing its own state must not cost it.
+    assert.equal(mesh.solver, second);
+  });
+
+  test("a solver that cannot wind takes it and ignores it", () => {
+    const mesh = chain();
+
+    mesh.switchSplineType(Clothoid, ClothoidSolver);
+    mesh.setSolverTuning({ branchLimit: Math.PI }).ensureSolve();
+
+    assert.ok(mesh.solver instanceof ClothoidSolver);
+
+    for (const e of mesh.edges) {
+      assert.ok(e.curve.length > 0 && Number.isFinite(e.curve.length), `edge length ${e.curve.length}`);
+    }
+  });
+
+  test("the stroker hands it to the mesh it fits", () => {
+    let dabs = 0;
+
+    const stroker = new Stroker(() => dabs++, {
+      CurveCls   : SPowerClothoid,
+      SolverCls  : SPowerSolver,
+      branchLimit: Math.PI,
+    });
+
+    for (let i = 0; i < 8; i++) {
+      stroker.onInput(i * 20, Math.sin(i * 0.5) * 15, 10, 0.1);
+    }
+
+    assert.ok(stroker.lastMesh, "eight inputs should have produced a fit");
+    assert.ok(dabs > 0, "and the fit should have been walked");
+    assert.equal(bound(stroker.lastMesh), Math.PI);
   });
 });
 

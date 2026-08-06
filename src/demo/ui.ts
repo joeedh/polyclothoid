@@ -18,6 +18,12 @@ export interface Settings {
   drawExtra: boolean;
   drawNormals: boolean;
   normalScale: number;
+
+  /** Off hands the solver `Infinity`, which is what winding looks like unguarded. */
+  branchGuard: boolean;
+
+  /** In degrees, because the interesting range is read that way. Applies to s-power only. */
+  branchLimitDeg: number;
 }
 
 export const defaultSettings: Settings = {
@@ -36,6 +42,9 @@ export const defaultSettings: Settings = {
   drawExtra  : true,
   drawNormals: false,
   normalScale: 4000,
+
+  branchGuard   : true,
+  branchLimitDeg: 360,
 };
 
 const STORAGE_KEY = "polyclothoid.demo.settings";
@@ -211,6 +220,11 @@ export function buildPanel(root: HTMLElement, settings: Settings, actions: Panel
   checkbox(mesh, settings, "drawNormals", "Curvature combs", onChange);
   slider(mesh, settings, "normalScale", "Comb scale", 100, 20000, 100, onChange);
   button(mesh, "Reset mesh", actions.resetMesh);
+
+  // Turn the guard off and drag a vertex through collinearity to see what it is for.
+  const branch = group(root, "Winding (s-power)");
+  checkbox(branch, settings, "branchGuard", "Guard on", onChange);
+  slider(branch, settings, "branchLimitDeg", "Turn limit°", 90, 1080, 15, onChange);
 
   const help = group(root, "Keys");
   const list = document.createElement("dl");

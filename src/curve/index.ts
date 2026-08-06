@@ -6,6 +6,7 @@ export {
   type SolvableEdge,
   type SolvableMesh,
   type SolvableVertex,
+  type SolverTuning,
 } from "./mesh_types.js";
 export { chains, cutOpen, walk, type Chain } from "./topology.js";
 

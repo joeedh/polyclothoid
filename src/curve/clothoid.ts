@@ -1,7 +1,7 @@
 import { CacheRing, Constraint, Solver, Vector2, clamp, fract } from "../math/index.js";
 import { Curve, type CurveEdge } from "./curve.js";
 import { emptySolveReport } from "./diagnostics.js";
-import { type CurveSolver, type SolvableMesh, type SolvableVertex } from "./mesh_types.js";
+import { type CurveSolver, type SolvableMesh, type SolvableVertex, type SolverTuning } from "./mesh_types.js";
 import { pairingLevel } from "./pairing.js";
 import { activeProfile } from "./profile.js";
 import * as nstructjs from "nstructjs";
@@ -290,8 +290,13 @@ Clothoid {
   }
 }
 
-/** Tuning for {@link ClothoidSolver}. */
-export interface ClothoidSolverOptions {
+/**
+ * Tuning for {@link ClothoidSolver}.
+ *
+ * It extends {@link SolverTuning} so a host can hand the same object to any solver. This one
+ * fits each joint from its own frame and cannot wind, so `branchLimit` arrives and is ignored.
+ */
+export interface ClothoidSolverOptions extends SolverTuning {
   /**
    * Register the curvature-continuity constraint (G2) alongside tangent continuity (G1).
    *

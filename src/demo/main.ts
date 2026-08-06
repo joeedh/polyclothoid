@@ -35,11 +35,17 @@ const dabs = new DabList();
 let mesh = makeStartMesh();
 let redrawPending = false;
 
+/** The panel carries degrees; the solver wants radians, and `Infinity` for "no guard". */
+function branchLimit() {
+  return settings.branchGuard ? (settings.branchLimitDeg * Math.PI) / 180 : Infinity;
+}
+
 function makeStartMesh() {
   const m = new Mesh();
   const s = 120;
   const d = 260;
 
+  m.solverTuning = { branchLimit: branchLimit() };
   m.switchSplineType(...SPLINES[settings.spline]);
 
   const v1 = m.makeVertex([s, s, 0]);
@@ -97,6 +103,7 @@ function resize() {
 const panelHooks = buildPanel(panel, settings, {
   onChange() {
     saveSettings(settings);
+    mesh.setSolverTuning({ branchLimit: branchLimit() });
     redraw();
   },
   clearDabs() {
