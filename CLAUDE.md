@@ -20,7 +20,7 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 | Test | `pnpm test` (esbuild-bundles `tests/**/*.test.ts`, then `node --test`) |
 | Bundle | `pnpm build` (esbuild) |
 | Dev server | `pnpm serve` (esbuild's own HTTP server, port 8080) |
-| NW.js shell | `pnpm nwjs` (desktop shell, CDP on port 9222 — see `docs/debugging.md`) |
+| NW.js shell | `pnpm nwjs` (desktop shell; own server on a free port, CDP on 9222) |
 | Pages bundle | `pnpm build:site` (minified build, then assemble `site/`) |
 | Format | `pnpm format` (`@pathtx/prettier`, a fork — not upstream prettier) |
 | Lint | `pnpm lint` (typescript-eslint, flat config) |
@@ -30,6 +30,14 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 `@pathtx/prettier` supplies the `alignPropertyValues: "group"` option that produces the
 aligned-colon object style used throughout this codebase. Upstream prettier will reformat
 those blocks incorrectly — do not swap it out.
+
+`pnpm nwjs` (`tools/nwjs.mjs`) wraps the demo in an NW.js desktop shell with the Chrome
+DevTools Protocol listening on port 9222 — `docs/debugging.md` has the launch and attach
+details. It starts its own watch + serve on a free port so a running `pnpm serve` is left
+alone, and generates the NW.js manifest into `dist/nwjs/` at launch (the served port is
+only known then — never check a manifest in). The `nw` dev dependency is pinned to an
+`-sdk` version because only that flavor ships DevTools and CDP; its postinstall downloads
+the binary and works only because `nw` is listed in `pnpm.onlyBuiltDependencies`.
 
 ## Deployment
 
@@ -148,7 +156,7 @@ src/
   mesh/           the spline mesh the solver runs over
   stroke.ts       the brush stroker itself
   demo/           canvas harness, vanilla TS, no UI library
-tools/            esbuild build and serve scripts, plus site.mjs (Pages assembly)
+tools/            esbuild build and serve scripts, site.mjs (Pages assembly), nwjs.mjs (NW.js shell)
 docs/             see above
 .github/workflows/  pages.yml — build and deploy the demo
 ```
