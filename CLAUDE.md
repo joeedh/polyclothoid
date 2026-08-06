@@ -20,6 +20,7 @@ Package manager is **pnpm**. Do not use npm or yarn — the lockfile is pnpm's.
 | Test | `pnpm test` (esbuild-bundles `tests/**/*.test.ts`, then `node --test`) |
 | Bundle | `pnpm build` (esbuild) |
 | Dev server | `pnpm serve` (esbuild's own HTTP server, port 8080) |
+| NW.js shell | `pnpm nwjs` (desktop shell, CDP on port 9222 — see `docs/debugging.md`) |
 | Pages bundle | `pnpm build:site` (minified build, then assemble `site/`) |
 | Format | `pnpm format` (`@pathtx/prettier`, a fork — not upstream prettier) |
 | Lint | `pnpm lint` (typescript-eslint, flat config) |
